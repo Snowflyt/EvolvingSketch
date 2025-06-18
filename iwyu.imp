@@ -1,0 +1,34 @@
+[
+  {
+    "include": [
+      "@<__math/.*>",
+      "private",
+      "<cmath>",
+      "public"
+    ]
+  },
+  {
+    "include": [
+      "@<__math/.*>",
+      "private",
+      "<math.h>",
+      "public"
+    ]
+  },
+  {
+    "include": [
+      "@<bits/chrono.h>",
+      "private",
+      "<chrono>",
+      "public"
+    ]
+  },
+  {
+    "include": [
+      "@<spdlog/.*>",
+      "private",
+      "<spdlog/spdlog.h>",
+      "public"
+    ]
+  }
+]
