@@ -13,6 +13,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <version>
 
 #include <mio/mmap.hpp>
 #include <spdlog/spdlog.h>
@@ -45,10 +46,10 @@ inline auto count_file_lines_hm(const std::filesystem::path &path, bool use_cach
 
   // Get last write time and convert to milliseconds since epoch
   const auto ftime = std::filesystem::last_write_time(path);
-#if defined(__APPLE__)
-  const auto sys_time = std::chrono::file_clock::to_sys(ftime);
-#else
+#if __cpp_lib_chrono >= 201907L
   const auto sys_time = std::chrono::clock_cast<std::chrono::system_clock>(ftime);
+#else
+  const auto sys_time = std::chrono::file_clock::to_sys(ftime);
 #endif
   const auto ms = std::chrono::time_point_cast<std::chrono::milliseconds>(sys_time);
   const auto mtime_ms = ms.time_since_epoch().count();
@@ -388,10 +389,10 @@ inline auto count_unique_products(const TransactionTrace &trace, bool use_cache 
 
   // Get last write time and convert to milliseconds since epoch
   const auto ftime = std::filesystem::last_write_time(file_path);
-#if defined(__APPLE__)
-  const auto sys_time = std::chrono::file_clock::to_sys(ftime);
-#else
+#if __cpp_lib_chrono >= 201907L
   const auto sys_time = std::chrono::clock_cast<std::chrono::system_clock>(ftime);
+#else
+  const auto sys_time = std::chrono::file_clock::to_sys(ftime);
 #endif
   const auto ms = std::chrono::time_point_cast<std::chrono::milliseconds>(sys_time);
   const auto mtime_ms = ms.time_since_epoch().count();
