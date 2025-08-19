@@ -52,15 +52,19 @@ include(cmake/CPM.cmake)
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   file(GLOB_RECURSE TEST_SOURCES "test/*.cpp")
 
-  CPMAddPackage("gh:catchorg/Catch2@3.8.1")
+ CPMAddPackage("gh:doctest/doctest@2.4.12")
 
-  add_executable(tests ${SOURCES} ${TEST_SOURCES})
-  target_link_libraries(tests PRIVATE Catch2::Catch2WithMain)
+  # Generate a translation unit that implements doctest main
+  set(DOCTEST_MAIN_CPP "${CMAKE_CURRENT_BINARY_DIR}/doctest_main.cpp")
+  file(GENERATE
+    OUTPUT "${DOCTEST_MAIN_CPP}"
+    CONTENT "#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN\n#include <doctest/doctest.h>\n"
+  )
 
-  list(APPEND CMAKE_MODULE_PATH ${CPM_PACKAGE_Catch2_SOURCE_DIR}/extras)
+  add_executable(tests ${SOURCES} ${TEST_SOURCES} "${DOCTEST_MAIN_CPP}")
+  target_link_libraries(tests PRIVATE doctest::doctest)
+
   include(CTest)
-  include(Catch)
-  catch_discover_tests(tests)
 
   list(APPEND projects tests)
 endif()

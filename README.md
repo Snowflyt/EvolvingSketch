@@ -7,7 +7,7 @@ This repository hosts the implementation and benchmarking of Evolving Sketch, an
 - Programming Language: C++
 - Build Tool: CMake
 - Logging: spdlog
-- Testing: Catch2
+- Testing: doctest
 - Others: Clang-Tidy / Clang-Format
 
 ## Build
