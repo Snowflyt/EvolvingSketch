@@ -20,6 +20,12 @@ elseif(MSVC)
   add_compile_options(/arch:AVX2)
 endif()
 
+# Use libc++ when using Clang on *nix
+if(UNIX AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
+  set(CMAKE_LINKER_FLAGS "${CMAKE_LINKER_FLAGS} -stdlib=libc++ -lc++abi")
+endif()
+
 # Include macOS SDK path if on Apple platform
 if(APPLE)
   execute_process(
@@ -112,6 +118,8 @@ endif()
 CPMAddPackage("gh:Dobiasd/FunctionalPlus@0.2.25")
 CPMAddPackage("gh:Neargye/magic_enum@0.9.7")
 CPMAddPackage("gh:gabime/spdlog@1.15.3")
+CPMAddPackage("gh:p-ranav/argparse@3.2")
+CPMAddPackage("gh:p-ranav/tabulate@1.5")
 CPMAddPackage(
   NAME mio
   GIT_TAG 8b6b7d878c89e81614d05edca7936de41ccdd2da

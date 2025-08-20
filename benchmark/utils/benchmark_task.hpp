@@ -1,9 +1,8 @@
 #pragma once
 
-#include <exception>
 #include <format>
-#include <fplus/container_common.hpp>
 #include <iostream>
+#include <print>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -55,36 +54,50 @@ inline std::vector<std::string> BenchmarkTask::task_names;
 
 inline auto benchmark_task_main(int argc, char **argv) -> int {
   if (argc < 2) {
-    std::cerr << "Usage: " << argv[0] << " {" << fplus::join_elem('|', BenchmarkTask::task_names)
-              << "} ..." << std::endl;
+    std::println(std::cerr, "Usage: {} {{{}}} ...", argv[0],
+                 fplus::join_elem('|', BenchmarkTask::task_names));
     return 1;
   }
 
   const std::string name = argv[1];
 
   if (const auto it = BenchmarkTask::tasks.find(name); it == BenchmarkTask::tasks.end()) {
-    std::cerr << "Unknown benchmark name: " << name << std::endl;
-    std::cerr << "Usage: " << argv[0] << " {" << fplus::join_elem('|', BenchmarkTask::task_names)
-              << "} ..." << std::endl;
+    std::println(std::cerr, "Unknown benchmark name: {}", name);
+    std::println(std::cerr, "Usage: {} {{{}}} ...", argv[0],
+                 fplus::join_elem('|', BenchmarkTask::task_names));
     return 1;
   }
+
+  char **processed_argv = new char *[argc - 1];
+  processed_argv[0] = new char[std::strlen(argv[0]) + 1 + name.length() + /* null terminator */ 1];
+  std::strcpy(processed_argv[0], argv[0]);
+  std::strcat(processed_argv[0], " ");
+  std::strcat(processed_argv[0], name.c_str());
+  for (size_t i = 2; i < argc; ++i)
+    processed_argv[i - 1] = argv[i];
 
   try {
-    const auto results = BenchmarkTask::tasks[name]->run(argc - 2, argv + 2);
-    std::cout << (std::holds_alternative<double>(results)
-                      ? std::format("{}", std::get<double>(results))
-                      : fplus::join_elem(
-                            ',', fplus::transform([](const auto v) { return std::format("{}", v); },
-                                                  std::get<std::vector<double>>(results))))
-              << std::endl;
+    const auto results = BenchmarkTask::tasks[name]->run(argc - 1, processed_argv);
+    std::println("{}",
+                 std::holds_alternative<double>(results)
+                     ? std::format("{}", std::get<double>(results))
+                     : fplus::join_elem(
+                           ',', fplus::transform([](const auto v) { return std::format("{}", v); },
+                                                 std::get<std::vector<double>>(results))));
   } catch (const usage_error &e) {
-    std::cerr << "Usage: " << argv[0] << " " << name << " " << e.what() << std::endl;
-    return 1;
-  } catch (const std::exception &e) {
-    std::cerr << e.what() << std::endl;
+    std::println(std::cerr, "Error: {}", e.msg());
+    std::println(std::cerr, "\nUsage: {} {} {}", argv[0], name,
+                 fplus::fwd::apply(e.usage(), fplus::fwd::trim_token_left(std::string("Usage")),
+                                   fplus::fwd::trim_left(':'), fplus::fwd::trim_left(' '),
+                                   fplus::fwd::trim_token_left(std::string(processed_argv[0])),
+                                   fplus::fwd::trim_left(' ')));
+    delete[] processed_argv[0];
+    delete[] processed_argv;
     return 1;
   }
 
+  delete[] processed_argv[0];
+  delete[] processed_argv;
   return 0;
 }
 

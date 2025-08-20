@@ -20,7 +20,7 @@
 #if defined(__linux__) || defined(__APPLE__)
 #include <unistd.h>
 #if defined(__linux__)
-#include <climits> // for PATH_MAX
+#include <linux/limits.h> // for PATH_MAX
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h> // for _NSGetExecutablePath
 #endif
@@ -31,7 +31,7 @@
 #include "../../src/utils/time.hpp"
 #include "errors.hpp"
 
-inline constexpr bool DEFAULT_PARALLEL = true;
+inline constexpr bool DEFAULT_PARALLEL = false;
 // inline constexpr size_t DEFAULT_TIMEOUT_MILLISECONDS = 900'000UZ;
 inline constexpr size_t DEFAULT_TIMEOUT_MILLISECONDS = std::numeric_limits<size_t>::max();
 
@@ -69,7 +69,8 @@ public:
 
   explicit Benchmark(const std::string &&name, const BenchmarkOptions &&opts)
       : name(name), filename_(name), options(opts),
-        available_benchmark_names_(get_available_benchmarks()) {
+        available_benchmark_names_(get_available_benchmarks()),
+        enabled_benchmark_names_(available_benchmark_names_) {
     benchmarks[name] = this;
     benchmark_names.push_back(name);
   }
@@ -81,7 +82,7 @@ public:
   Benchmark(Benchmark &&) = delete;
   auto operator=(Benchmark &&) -> Benchmark & = delete;
 
-  virtual void run(const std::vector<std::string> &args) = 0;
+  virtual void run(int argc, char **argv) = 0;
 
   void on_benchmark_finished(
       std::function<void(const std::string_view name, const std::vector<std::string> &args,
@@ -185,8 +186,17 @@ public:
   }
 
   template <ConvertibleToString... Args> void benchmark_all(Args &&...args) {
-    for (const std::string &name : available_benchmark_names_)
+    for (const std::string &name : enabled_benchmark_names_)
       benchmark(name, std::forward<Args>(args)...);
+  }
+
+  void set_enabled_benchmarks(const std::vector<std::string> &enabled_benchmarks) {
+    // Check if all enabled benchmarks are available
+    for (const std::string &enabled_benchmark : enabled_benchmarks)
+      if (std::ranges::find(available_benchmark_names_, enabled_benchmark) ==
+          available_benchmark_names_.end())
+        throw std::runtime_error("Unknown benchmark: " + enabled_benchmark);
+    enabled_benchmark_names_ = enabled_benchmarks;
   }
 
 protected:
@@ -199,9 +209,12 @@ protected:
     return available_benchmark_names_;
   }
 
+  auto enabled_benchmark_names() -> std::vector<std::string> { return enabled_benchmark_names_; }
+
 private:
   std::string filename_;
   std::vector<std::string> available_benchmark_names_;
+  std::vector<std::string> enabled_benchmark_names_;
 
   std::vector<std::future<void>> tasks_;
 
@@ -280,20 +293,20 @@ inline std::vector<std::string> Benchmark::benchmark_names;
   class CONCAT(Benchmark, __LINE__) : public Benchmark {                                           \
   public:                                                                                          \
     CONCAT(Benchmark, __LINE__)() : Benchmark(name, {}) {}                                         \
-    void run(const std::vector<std::string> &args) override;                                       \
+    void run(int argc, char **argv) override;                                                      \
   };                                                                                               \
   inline CONCAT(Benchmark, __LINE__) CONCAT(benchmark, __LINE__);                                  \
-  void CONCAT(Benchmark, __LINE__)::run(const std::vector<std::string> &args)
+  void CONCAT(Benchmark, __LINE__)::run(int argc, char **argv)
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define BENCHMARK_WITH_OPTIONS(name, options)                                                      \
   class CONCAT(Benchmark, __LINE__) : public Benchmark {                                           \
   public:                                                                                          \
     CONCAT(Benchmark, __LINE__)() : Benchmark(name, options) {}                                    \
-    void run(const std::vector<std::string> &args) override;                                       \
+    void run(int argc, char **argv) override;                                                      \
   };                                                                                               \
   inline CONCAT(Benchmark, __LINE__) CONCAT(benchmark, __LINE__);                                  \
-  void CONCAT(Benchmark, __LINE__)::run(const std::vector<std::string> &args)
+  void CONCAT(Benchmark, __LINE__)::run(int argc, char **argv)
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define GET_3RD_ARG(arg1, arg2, arg3, ...) arg3
@@ -306,12 +319,19 @@ inline std::vector<std::string> Benchmark::benchmark_names;
 
 inline auto benchmark_main(int argc, char **argv) -> int {
   if (argc < 2) {
-    std::cerr << "Usage:" << std::endl;
+    std::println("Usage:");
     for (const auto &name : Benchmark::benchmark_names) {
       try {
-        Benchmark::benchmarks[name]->run({});
+        Benchmark::benchmarks[name]->run(argc, argv);
       } catch (const usage_error &e) {
-        std::cerr << "  " << argv[0] << " " << name << " " << e.what() << std::endl;
+        std::println(std::cerr, "  {} {} {}", argv[0], name,
+                     fplus::fwd::apply(e.usage(), fplus::fwd::trim_token_left(std::string("Usage")),
+                                       fplus::fwd::trim_left(':'), fplus::fwd::trim_left(' '),
+                                       fplus::fwd::trim_token_left(std::string(argv[0])),
+                                       fplus::fwd::trim_left(' '),
+                                       fplus::fwd::trim_token_left(name),
+                                       fplus::fwd::trim_left(' '), fplus::fwd::split('\n', false),
+                                       fplus::fwd::elem_at_idx(0)));
       }
     }
     return 1;
@@ -320,18 +340,34 @@ inline auto benchmark_main(int argc, char **argv) -> int {
   const std::string name = argv[1];
 
   if (const auto it = Benchmark::benchmarks.find(name); it == Benchmark::benchmarks.end()) {
-    std::cerr << "Unknown benchmark name: " << name << std::endl;
+    std::println(std::cerr, "Unknown benchmark name: {}", name);
     return 1;
   }
 
-  const std::vector<std::string> args(argv + 2, argv + argc);
+  char **processed_argv = new char *[argc - 1];
+  processed_argv[0] = new char[std::strlen(argv[0]) + 1 + name.length() + /* null terminator */ 1];
+  std::strcpy(processed_argv[0], argv[0]);
+  std::strcat(processed_argv[0], " ");
+  std::strcat(processed_argv[0], name.c_str());
+  for (size_t i = 2; i < argc; ++i)
+    processed_argv[i - 1] = argv[i];
+
   try {
-    Benchmark::benchmarks[name]->run(args);
+    Benchmark::benchmarks[name]->run(argc - 1, processed_argv);
   } catch (const usage_error &e) {
-    std::cerr << "Usage: " << argv[0] << " " << name << " " << e.what() << std::endl;
+    std::println(std::cerr, "Error: {}", e.msg());
+    std::println(std::cerr, "\nUsage: {} {} {}", argv[0], name,
+                 fplus::fwd::apply(e.usage(), fplus::fwd::trim_token_left(std::string("Usage")),
+                                   fplus::fwd::trim_left(':'), fplus::fwd::trim_left(' '),
+                                   fplus::fwd::trim_token_left(std::string(processed_argv[0])),
+                                   fplus::fwd::trim_left(' ')));
+    delete[] processed_argv[0];
+    delete[] processed_argv;
     return 1;
   }
 
+  delete[] processed_argv[0];
+  delete[] processed_argv;
   return 0;
 }
 
