@@ -17,6 +17,14 @@
   },
   {
     "include": [
+      "@<__vector/.*>",
+      "private",
+      "<vector>",
+      "public"
+    ]
+  },
+  {
+    "include": [
       "@<bits/chrono.h>",
       "private",
       "<chrono>",
@@ -25,9 +33,33 @@
   },
   {
     "include": [
+      "@<__ostream/print.h>",
+      "private",
+      "<print>",
+      "public"
+    ]
+  },
+  {
+    "include": [
       "@<spdlog/.*>",
       "private",
       "<spdlog/spdlog.h>",
+      "public"
+    ]
+  },
+  {
+    "include": [
+      "@<fplus/.*>",
+      "private",
+      "<fplus/fplus.hpp>",
+      "public"
+    ]
+  },
+   {
+    "include": [
+      "@<tabulate/.*>",
+      "private",
+      "<tabulate/table.hpp>",
       "public"
     ]
   }
