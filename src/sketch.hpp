@@ -2,11 +2,10 @@
 
 #include <algorithm>
 #include <bit>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <functional>
+#include <limits>
 #include <random>
 #include <type_traits>
 #include <variant>
@@ -15,24 +14,39 @@
 #include "utils/memory.hpp"
 #include "utils/time.hpp"
 
-template <typename E> struct EvolvingSketchOptions {
+template <typename E> struct IdentityAdapter {
+  constexpr double operator()(E & /*e*/, double alpha) const noexcept { return alpha; }
+};
+
+template <typename F, typename E = std::monostate, typename Adapter = IdentityAdapter<E>>
+  requires std::is_invocable_r_v<float, F, uint32_t, double> &&
+           std::is_invocable_r_v<double, Adapter, E &, double>
+struct EvolvingSketchOptions {
   double initial_alpha = 1.0;
-  std::function<float(uint32_t t, double alpha)> f = nullptr;
-  uint32_t tuning_interval = 0;
-  std::function<double(E &e, double alpha)> adapter = nullptr;
+  F f;
+  Adapter adapter;
   uint32_t adapt_interval = 0;
 };
 
-template <typename T, typename E = std::monostate> class EvolvingSketch {
+template <typename T, typename F, typename E = std::monostate,
+          typename Adapter = IdentityAdapter<E>>
+  requires std::is_invocable_r_v<float, F, uint32_t, double> &&
+           std::is_invocable_r_v<double, Adapter, E &, double>
+class EvolvingSketch {
+private:
+  // Safe threshold for pruning to avoid float overflow
+  // This is the max safe threshold where +1 would not be omitted
+  static constexpr float PRUNE_THRESHOLD = 16777215.0F;
+
 public:
   // NOLINTNEXTLINE
   E external_metrics;
 
-  explicit EvolvingSketch(const size_t size, const EvolvingSketchOptions<E> &&options = {})
+  explicit EvolvingSketch(const size_t size, const EvolvingSketchOptions<F, E, Adapter> &options)
       : k_width_(std::bit_ceil(std::max(size / 4, 8UZ))),
         data_(aligned_alloc<std::remove_pointer_t<decltype(data_)>>(4 * k_width_)), k_f_(options.f),
         k_adapter_(options.adapter), alpha_(options.initial_alpha),
-        k_tuning_interval_(options.tuning_interval), k_adapt_interval_(options.adapt_interval) {
+        k_adapt_interval_(options.adapt_interval) {
     if (!data_)
       throw std::bad_alloc();
 
@@ -50,7 +64,7 @@ public:
       : k_width_(other.k_width_),
         data_(aligned_alloc<std::remove_pointer_t<decltype(data_)>>(4 * k_width_)),
         k_f_(other.k_f_), k_adapter_(other.k_adapter_), alpha_(other.alpha_),
-        k_tuning_interval_(other.k_tuning_interval_), k_adapt_interval_(other.k_adapt_interval_) {
+        k_adapt_interval_(other.k_adapt_interval_) {
     if (!data_)
       throw std::bad_alloc();
 
@@ -67,17 +81,13 @@ public:
   EvolvingSketch(EvolvingSketch &&other) noexcept
       : k_width_(other.k_width_), data_(other.data_), k_f_(std::move(other.k_f_)),
         k_adapter_(std::move(other.k_adapter_)), alpha_(other.alpha_),
-        k_tuning_interval_(other.k_tuning_interval_), k_adapt_interval_(other.k_adapt_interval_) {
+        k_adapt_interval_(other.k_adapt_interval_) {
     for (size_t i = 0; i < 4; i++)
       seeds_[i] = other.seeds_[i];
 
     other.k_width_ = 0;
     other.data_ = nullptr;
-    other.k_f_ = nullptr;
-    other.k_adapter_ = nullptr;
     other.alpha_ = 0.0;
-    other.k_tuning_interval_ = 0;
-    other.tuning_counter_ = 0;
     other.k_adapt_interval_ = 0;
     other.adapt_counter_ = 0;
   }
@@ -106,8 +116,6 @@ public:
     k_f_ = other.k_f_;
     k_adapter_ = other.k_adapter_;
     alpha_ = other.alpha_;
-    k_tuning_interval_ = other.k_tuning_interval_;
-    tuning_counter_ = other.tuning_counter_;
     k_adapt_interval_ = other.k_adapt_interval_;
     adapt_counter_ = other.adapt_counter_;
 
@@ -125,8 +133,6 @@ public:
     k_f_ = std::move(other.k_f_);
     k_adapter_ = std::move(other.k_adapter_);
     alpha_ = other.alpha_;
-    k_tuning_interval_ = other.k_tuning_interval_;
-    tuning_counter_ = other.tuning_counter_;
     k_adapt_interval_ = other.k_adapt_interval_;
     adapt_counter_ = other.adapt_counter_;
 
@@ -135,11 +141,7 @@ public:
 
     other.k_width_ = 0;
     other.data_ = nullptr;
-    other.k_f_ = nullptr;
-    other.k_adapter_ = nullptr;
     other.alpha_ = 0.0;
-    other.k_tuning_interval_ = 0;
-    other.tuning_counter_ = 0;
     other.k_adapt_interval_ = 0;
     other.adapt_counter_ = 0;
 
@@ -149,20 +151,43 @@ public:
   void update(const T &item) {
     const auto start = get_current_time_in_seconds();
 
+  retry_update:
     const auto increment = k_f_(++t_, alpha_);
 
+    // For rollback if overflow detected
+    size_t counter_positions[4];
+    float original_counters[4];
+
+    // Increment counters
+    bool overflow_detected = false;
     size_t index = hash(item) % k_width_;
-    for (size_t i = 0; i < 4; i++) {
+    size_t i;
+    for (i = 0; i < 4; i++) {
       if (i > 0)
         index = alt_index(index, seeds_[i]);
       const size_t pos = i * k_width_ + index;
-      data_[pos] += increment;
+      auto &v = data_[pos];
+      if (v > PRUNE_THRESHOLD - increment) {
+        overflow_detected = true;
+        break;
+      }
+      counter_positions[i] = pos;
+      original_counters[i] = v;
+      v += increment;
+    }
+
+    // If overflow detected, rollback written counters
+    if (overflow_detected) {
+      for (size_t j = 0; j < i; j++)
+        data_[counter_positions[j]] = original_counters[j];
+      t_--;
+      prune();
+      // NOLINTNEXTLINE(cppcoreguidelines-avoid-goto)
+      goto retry_update;
     }
 
     if (k_adapt_interval_ && ++adapt_counter_ >= k_adapt_interval_)
       adapt();
-    if (k_tuning_interval_ && ++tuning_counter_ >= k_tuning_interval_)
-      tune();
 
     total_update_time_seconds_ += get_current_time_in_seconds() - start;
     update_count_++;
@@ -203,15 +228,12 @@ private:
 
   uint32_t t_ = 0;
   double alpha_;
-  std::function<float(uint32_t t, double alpha)> k_f_;
-
-  uint32_t k_tuning_interval_ = 0;
-  uint32_t tuning_counter_ = 0;
+  F k_f_;
 
   uint32_t k_adapt_interval_;
   uint32_t adapt_counter_ = 0;
 
-  std::function<double(E &e, double alpha)> k_adapter_;
+  Adapter k_adapter_;
 
   /* Benchmark start */
   mutable size_t update_count_ = 0;
@@ -234,24 +256,22 @@ private:
   }
 
   /**
-   * @brief Periodically reset `t` to avoid overflow.
+   * @brief Periodically reset 't' and prune counters to avoid overflow.
    */
-  void tune() {
+  void prune() {
     const auto d = k_f_(t_, alpha_);
     for (size_t i = 0; i < 4; i++)
       for (size_t j = 0; j < k_width_; j++)
         data_[i * k_width_ + j] /= d;
     t_ = 0;
-    tuning_counter_ = 0;
   }
 
   /**
    * @brief Periodically adapt alpha.
    */
   void adapt() {
-    tune();
-    if (k_adapter_ != nullptr)
-      alpha_ = k_adapter_(external_metrics, alpha_);
+    prune();
+    alpha_ = k_adapter_(external_metrics, alpha_);
     adapt_counter_ = 0;
   }
 };

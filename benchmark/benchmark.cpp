@@ -312,8 +312,6 @@ BENCHMARK("hm") {
   if (options.parallel) {
     for (const auto &alpha : alphas) {
       spdlog::info("Running H&M Trending (k={}) benchmark with α={}...", top_k, alpha);
-
-      coverages.clear(); // Clear previous results
       benchmark_all(trace_path, cache_size, top_k, alpha);
     }
 
@@ -335,7 +333,6 @@ BENCHMARK("hm") {
     for (const auto &alpha : alphas) {
       spdlog::info("Running H&M Trending (k={}) benchmark with α={}...", top_k, alpha);
 
-      coverages.clear(); // Clear previous results
       benchmark_all(trace_path, cache_size, top_k, alpha);
       wait();
       std::println();

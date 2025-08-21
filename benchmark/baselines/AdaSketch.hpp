@@ -2,11 +2,9 @@
 
 #include <algorithm>
 #include <bit>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <functional>
 #include <random>
 #include <type_traits>
 
@@ -14,17 +12,20 @@
 #include "../../src/utils/memory.hpp"
 #include "../../src/utils/time.hpp"
 
+template <typename F>
+  requires std::is_invocable_r_v<float, F, uint32_t>
 struct AdaSketchOptions {
-  std::function<float(uint32_t t)> f = nullptr;
-  uint32_t tuning_interval = 0;
+  F f;
 };
 
-template <typename T> class AdaSketch {
+template <typename T, typename F>
+  requires std::is_invocable_r_v<float, F, uint32_t>
+class AdaSketch {
 public:
-  explicit AdaSketch(const size_t size, const AdaSketchOptions &&options = {})
+  explicit AdaSketch(size_t size, const AdaSketchOptions<F> &options)
       : k_width_(std::bit_ceil(std::max(size / 4, 8UZ))),
-        data_(aligned_alloc<std::remove_pointer_t<decltype(data_)>>(4 * k_width_)), k_f_(options.f),
-        k_tuning_interval_(options.tuning_interval) {
+        data_(aligned_alloc<std::remove_pointer_t<decltype(data_)>>(4 * k_width_)),
+        k_f_(options.f) {
     if (!data_)
       throw std::bad_alloc();
 
@@ -41,7 +42,7 @@ public:
   AdaSketch(const AdaSketch &other)
       : k_width_(other.k_width_),
         data_(aligned_alloc<std::remove_pointer_t<decltype(data_)>>(4 * k_width_)),
-        k_f_(other.k_f_), k_tuning_interval_(other.k_tuning_interval_) {
+        k_f_(other.k_f_) {
     if (!data_)
       throw std::bad_alloc();
 
@@ -56,15 +57,12 @@ public:
   }
 
   AdaSketch(AdaSketch &&other) noexcept
-      : k_width_(other.k_width_), data_(other.data_), k_f_(std::move(other.k_f_)),
-        k_tuning_interval_(other.k_tuning_interval_) {
+      : k_width_(other.k_width_), data_(other.data_), k_f_(std::move(other.k_f_)) {
     for (size_t i = 0; i < 4; i++)
       seeds_[i] = other.seeds_[i];
 
     other.k_width_ = 0;
     other.data_ = nullptr;
-    other.k_f_ = nullptr;
-    other.k_tuning_interval_ = 0;
   }
 
   auto operator=(const AdaSketch &other) -> AdaSketch & {
@@ -89,7 +87,6 @@ public:
       seeds_[i] = other.seeds_[i];
 
     k_f_ = other.k_f_;
-    k_tuning_interval_ = other.k_tuning_interval_;
 
     return *this;
   }
@@ -103,7 +100,6 @@ public:
     k_width_ = other.k_width_;
     data_ = other.data_;
     k_f_ = std::move(other.k_f_);
-    k_tuning_interval_ = other.k_tuning_interval_;
 
     for (size_t i = 0; i < 4; i++)
       seeds_[i] = other.seeds_[i];
@@ -111,7 +107,6 @@ public:
     other.k_width_ = 0;
     other.data_ = nullptr;
     other.k_f_ = nullptr;
-    other.k_tuning_interval_ = 0;
 
     return *this;
   }
@@ -128,9 +123,6 @@ public:
       const size_t pos = i * k_width_ + index;
       data_[pos] += increment;
     }
-
-    if (k_tuning_interval_ && ++tuning_counter_ >= k_tuning_interval_)
-      tune();
 
     total_update_time_seconds_ += get_current_time_in_seconds() - start;
     update_count_++;
@@ -170,10 +162,7 @@ private:
   size_t seeds_[4];
 
   uint32_t t_ = 0;
-  std::function<float(uint32_t t)> k_f_;
-
-  uint32_t k_tuning_interval_;
-  uint32_t tuning_counter_ = 0;
+  F k_f_;
 
   /* Benchmark start */
   mutable size_t update_count_ = 0;
@@ -193,17 +182,5 @@ private:
     // A quick and dirty way to generate an alternative index
     // 0x5bd1e995 is the hash constant from MurmurHash2
     return (index ^ (seed * 0x5bd1e995)) % k_width_;
-  }
-
-  /**
-   * @brief Periodically reset `t` to avoid overflow.
-   */
-  void tune() {
-    const auto d = k_f_(t_);
-    for (size_t i = 0; i < 4; i++)
-      for (size_t j = 0; j < k_width_; j++)
-        data_[i * k_width_ + j] /= d;
-    t_ = 0;
-    tuning_counter_ = 0;
   }
 };
