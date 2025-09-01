@@ -1,8 +1,10 @@
 #include <cmath>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <queue>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 
 #include <argparse/argparse.hpp>
@@ -62,9 +64,13 @@ auto parse_args(int argc, char **argv) -> Args {
   }
 }
 
-template <typename SKETCH>
-auto benchmark(
-    SKETCH &sketch, const Args &args, const std::function<void()> &&on_hit = []() {}) -> double {
+struct Noop0 {
+  void operator()() const noexcept {}
+};
+
+template <typename Sketch, typename OnHit = Noop0>
+  requires std::is_invocable_r_v<void, OnHit>
+auto benchmark(Sketch &sketch, const Args &args, OnHit on_hit = Noop0{}) -> double {
   size_t hit_count = 0;
 
   const TransactionTrace trace(args.trace_path);
@@ -81,7 +87,8 @@ auto benchmark(
 
     if (top_k_set.contains(product)) {
       hit_count++;
-      on_hit();
+      if constexpr (!std::same_as<OnHit, Noop0>)
+        on_hit();
       sketch.update(product);
       continue;
     }
@@ -144,17 +151,17 @@ REGISTER_BENCHMARK_TASK("CMS") {
 
 REGISTER_BENCHMARK_TASK("ADA") {
   const Args args = parse_args(argc, argv);
-  AdaSketch<T> sketch(args.cache_size,
-                      {.f = [alpha = args.alpha](const auto t) { return f(t, alpha); }});
+  auto f2 = [alpha = args.alpha](uint32_t t) -> float { return f(t, alpha); };
+  AdaSketch<T, decltype(f2)> sketch(args.cache_size, AdaSketchOptions<decltype(f2)>{.f = f2});
   const double coverage = benchmark(sketch, args);
   return std::vector{coverage, sketch.update_time_avg_seconds(),
                      sketch.estimate_time_avg_seconds()};
 }
 
-REGISTER_BENCHMARK_TASK("EVO_TUNING_ONLY") {
+REGISTER_BENCHMARK_TASK("EVO_PRUNING_ONLY") {
   const Args args = parse_args(argc, argv);
-  EvolvingSketch<T> sketch(args.cache_size,
-                           {.initial_alpha = args.alpha, .f = f, .tuning_interval = 10});
+  auto f2 = [](uint32_t t, double alpha) -> float { return f(t, alpha); };
+  EvolvingSketch<T, decltype(f2)> sketch(args.cache_size, {.initial_alpha = args.alpha, .f = f2});
   const double coverage = benchmark(sketch, args);
   return std::vector{coverage, sketch.update_time_avg_seconds(),
                      sketch.estimate_time_avg_seconds()};
@@ -169,11 +176,11 @@ REGISTER_BENCHMARK_TASK("EVO") {
   if (args.record_adaptation_history)
     adapter.start_recording_history();
 
-  EvolvingSketchOptim<T> sketch(args.cache_size, {.initial_alpha = args.alpha,
-                                                  .f = f,
-                                                  .tuning_interval = 10,
-                                                  .adapter = &adapter,
-                                                  .adapt_interval = ADAPT_INTERVAL});
+  auto f2 = [](uint32_t t, double alpha) -> float { return f(t, alpha); };
+  EvolvingSketchOptim<T, decltype(f2)> sketch(args.cache_size, {.initial_alpha = args.alpha,
+                                                                .f = f2,
+                                                                .adapter = &adapter,
+                                                                .adapt_interval = ADAPT_INTERVAL});
 
   const double coverage = benchmark(sketch, args, [&]() { sketch.hit_count++; });
 

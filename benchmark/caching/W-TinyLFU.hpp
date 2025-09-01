@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <unordered_map>
 
 #include <spdlog/spdlog.h>
@@ -19,21 +20,21 @@ template <typename K> struct WTinyLFUNodeValue {
 // [ToS'17] TinyLFU: A Highly Efficient Cache Admission Policy
 // * Link: https://dl.acm.org/doi/abs/10.1145/3149371
 // * Paper: https://dl.acm.org/doi/pdf/10.1145/3149371
-template <typename K, typename V, typename SKETCH>
+template <typename K, typename V, typename Sketch>
 class WTinyLFUPolicy : public CacheReplacementPolicy<K, V> {
 private:
   static constexpr double WINDOW_SIZE_RATIO = 0.01;
   static constexpr double PROBATION_SIZE_RATIO = 0.2;
 
 public:
-  explicit WTinyLFUPolicy(const size_t max_size, const SKETCH &sketch)
+  explicit WTinyLFUPolicy(const size_t max_size, std::shared_ptr<Sketch> sketch)
       : k_max_window_size_(static_cast<size_t>(static_cast<double>(max_size) * WINDOW_SIZE_RATIO)),
         k_max_probation_size_((max_size - k_max_window_size_) * PROBATION_SIZE_RATIO),
         k_max_protected_size_(max_size - k_max_window_size_ - k_max_probation_size_),
         sketch_(sketch) {}
 
   void handle_cache_hit(const K &key) override {
-    sketch_.update(key);
+    sketch_->update(key);
 
     auto *node = key2node_[key];
 
@@ -63,12 +64,12 @@ public:
   void handle_cache_miss(Cache<K, V> &cache, const K &key, const V &value) override {
     using enum WTinyLFUNodeType;
 
-    sketch_.update(key);
+    sketch_->update(key);
 
     if (window_list_.size() == k_max_window_size_) {
       if (probation_list_.size() == k_max_probation_size_) {
-        if (sketch_.estimate(window_list_.tail()->value.key) >
-            sketch_.estimate(probation_list_.tail()->value.key)) {
+        if (sketch_->estimate(window_list_.tail()->value.key) >
+            sketch_->estimate(probation_list_.tail()->value.key)) {
           // Move window list tail to probation list and change its type
           auto *node = window_list_.transfer_tail_to_head_of(probation_list_);
           node->value.type = PROBATION;
@@ -97,10 +98,10 @@ public:
 
   /* Benchmark start */
   [[nodiscard]] auto update_time_avg_seconds() const -> double {
-    return sketch_.update_time_avg_seconds();
+    return sketch_->update_time_avg_seconds();
   }
   [[nodiscard]] auto estimate_time_avg_seconds() const -> double {
-    return sketch_.estimate_time_avg_seconds();
+    return sketch_->estimate_time_avg_seconds();
   }
   /* Benchmark end */
 
@@ -115,5 +116,5 @@ private:
 
   std::unordered_map<K, Node<WTinyLFUNodeValue<K>> *> key2node_;
 
-  SKETCH sketch_;
+  std::shared_ptr<Sketch> sketch_;
 };

@@ -1,9 +1,13 @@
 #include <cmath>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <format>
+#include <memory>
 #include <string>
+#include <type_traits>
+#include <variant>
 #include <vector>
 
 #include <argparse/argparse.hpp>
@@ -58,9 +62,14 @@ auto parse_args(int argc, char **argv) -> Args {
   }
 }
 
-auto benchmark(
-    CacheReplacementPolicy<K, V> &policy, const Args &args,
-    const std::function<void()> &&on_hit = []() {}) -> double {
+struct Noop0 {
+  void operator()() const noexcept {}
+};
+
+template <typename OnHit = Noop0>
+  requires std::is_invocable_r_v<void, OnHit>
+auto benchmark(CacheReplacementPolicy<K, V> &policy, const Args &args, OnHit on_hit = Noop0{})
+    -> double {
   size_t hit_count = 0;
 
   const CachingTrace trace(args.trace_path);
@@ -72,7 +81,8 @@ auto benchmark(
     V value; // This is a dummy value
     if (cache.contains(req.obj_id)) {
       hit_count++;
-      on_hit();
+      if constexpr (!std::same_as<OnHit, Noop0>)
+        on_hit();
       policy.handle_cache_hit(req.obj_id);
     } else {
       policy.handle_cache_miss(cache, req.obj_id, value);
@@ -90,7 +100,7 @@ auto benchmark(
 REGISTER_BENCHMARK_TASK("FIFO") {
   const Args args = parse_args(argc, argv);
   FIFOPolicy<K, V> policy(args.cache_size);
-  return benchmark(policy, args.trace_path, args.cache_size);
+  return benchmark(policy, args);
 }
 
 auto f(const uint32_t t, const double alpha) -> float {
@@ -99,8 +109,8 @@ auto f(const uint32_t t, const double alpha) -> float {
 
 REGISTER_BENCHMARK_TASK("W-TinyLFU_CMS") {
   const Args args = parse_args(argc, argv);
-  WTinyLFUPolicy<K, V, CountMinSketch<K>> policy(args.cache_size,
-                                                 CountMinSketch<K>(args.cache_size));
+  WTinyLFUPolicy<K, V, CountMinSketch<K>> policy{
+      args.cache_size, std::make_shared<CountMinSketch<K>>(args.cache_size)};
   const double miss_ratio = benchmark(policy, args);
   return std::vector{miss_ratio, policy.update_time_avg_seconds(),
                      policy.estimate_time_avg_seconds()};
@@ -108,21 +118,22 @@ REGISTER_BENCHMARK_TASK("W-TinyLFU_CMS") {
 
 REGISTER_BENCHMARK_TASK("W-TinyLFU_ADA") {
   const Args args = parse_args(argc, argv);
-  WTinyLFUPolicy<K, V, AdaSketch<K>> policy(
-      args.cache_size, AdaSketch<K>(args.cache_size, {.f = [alpha = args.alpha](const auto t) {
-                                      return f(t, alpha);
-                                    }}));
+  auto f2 = [alpha = args.alpha](uint32_t t) -> float { return f(t, alpha); };
+  WTinyLFUPolicy<K, V, AdaSketch<K, decltype(f2)>> policy{
+      args.cache_size, std::make_shared<AdaSketch<K, decltype(f2)>>(
+                           args.cache_size, AdaSketchOptions<decltype(f2)>{.f = f2})};
   const double miss_ratio = benchmark(policy, args);
   return std::vector{miss_ratio, policy.update_time_avg_seconds(),
                      policy.estimate_time_avg_seconds()};
 }
 
-REGISTER_BENCHMARK_TASK("W-TinyLFU_EVO_TUNING_ONLY") {
+REGISTER_BENCHMARK_TASK("W-TinyLFU_EVO_PRUNING_ONLY") {
   const Args args = parse_args(argc, argv);
-  WTinyLFUPolicy<K, V, EvolvingSketch<K>> policy(
-      args.cache_size,
-      EvolvingSketch<K>(args.cache_size,
-                        {.initial_alpha = args.alpha, .f = f, .tuning_interval = 200}));
+  auto f2 = [](uint32_t t, double alpha) -> float { return f(t, alpha); };
+  WTinyLFUPolicy<K, V, EvolvingSketch<K, decltype(f2)>> policy{
+      args.cache_size, std::make_shared<EvolvingSketch<K, decltype(f2)>>(
+                           args.cache_size, EvolvingSketchOptions<decltype(f2)>{
+                                                .initial_alpha = args.alpha, .f = f2})};
   const double miss_ratio = benchmark(policy, args);
   return std::vector{miss_ratio, policy.update_time_avg_seconds(),
                      policy.estimate_time_avg_seconds()};
@@ -131,18 +142,19 @@ REGISTER_BENCHMARK_TASK("W-TinyLFU_EVO_TUNING_ONLY") {
 REGISTER_BENCHMARK_TASK("W-TinyLFU_EVO") {
   const Args args = parse_args(argc, argv);
 
-  EpsilonGreedyAdapter adapter(0.1, 1000.0, 100, 0.1, 0.99);
+  EpsilonGreedyAdapter adapter{0.1, 1000.0, 100, 0.1, 0.99};
   constexpr uint32_t ADAPT_INTERVAL = 100000;
 
   if (args.record_adaptation_history)
     adapter.start_recording_history();
 
-  EvolvingSketchOptim<K> sketch(args.cache_size, {.initial_alpha = args.alpha,
-                                                  .f = f,
-                                                  .tuning_interval = 200,
+  auto f2 = [](uint32_t t, double alpha) -> float { return f(t, alpha); };
+  auto sketch = std::make_shared<EvolvingSketchOptim<K, decltype(f2)>>(
+      args.cache_size, EvolvingSketchOptimOptions{.initial_alpha = args.alpha,
+                                                  .f = f2,
                                                   .adapter = &adapter,
                                                   .adapt_interval = ADAPT_INTERVAL});
-  WTinyLFUPolicy<K, V, EvolvingSketchOptim<K>> policy(args.cache_size, sketch);
+  WTinyLFUPolicy<K, V, EvolvingSketchOptim<K, decltype(f2)>> policy{args.cache_size, sketch};
 
   const double miss_ratio = benchmark(policy, args, [&]() { sketch->hit_count++; });
 

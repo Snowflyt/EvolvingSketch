@@ -312,8 +312,6 @@ BENCHMARK("hm") {
   if (options.parallel) {
     for (const auto &alpha : alphas) {
       spdlog::info("Running H&M Trending (k={}) benchmark with α={}...", top_k, alpha);
-
-      coverages.clear(); // Clear previous results
       benchmark_all(trace_path, cache_size, top_k, alpha);
     }
 
@@ -321,33 +319,32 @@ BENCHMARK("hm") {
     std::println();
 
     for (const auto &alpha : alphas) {
-      // Sort by miss ratio (ascending)
-      std::vector<std::pair<std::string_view, double>> miss_ratios_sorted(coverages[alpha].begin(),
-                                                                          coverages[alpha].end());
-      std::ranges::sort(miss_ratios_sorted,
-                        [](const auto &lhs, const auto &rhs) { return lhs.second < rhs.second; });
-      spdlog::info("[α={}] Sorted by miss ratio (ascending):", alpha);
-      for (const auto &[name, miss_ratio] : miss_ratios_sorted)
-        spdlog::info("[α={}] {}: {:.6f}%", alpha, name, miss_ratio * 100);
+      // Sort by trending coverage (descending)
+      std::vector<std::pair<std::string_view, double>> coverages_sorted(coverages[alpha].begin(),
+                                                                        coverages[alpha].end());
+      std::ranges::sort(coverages_sorted,
+                        [](const auto &lhs, const auto &rhs) { return lhs.second > rhs.second; });
+      spdlog::info("[α={}] Sorted by trending coverage (descending):", alpha);
+      for (const auto &[name, coverage] : coverages_sorted)
+        spdlog::info("[α={}] {}: {:.6f}%", alpha, name, coverage * 100);
       std::println();
     }
   } else {
     for (const auto &alpha : alphas) {
       spdlog::info("Running H&M Trending (k={}) benchmark with α={}...", top_k, alpha);
 
-      coverages.clear(); // Clear previous results
       benchmark_all(trace_path, cache_size, top_k, alpha);
       wait();
       std::println();
 
-      // Sort by miss ratio (ascending)
-      std::vector<std::pair<std::string_view, double>> miss_ratios_sorted(coverages[alpha].begin(),
-                                                                          coverages[alpha].end());
-      std::ranges::sort(miss_ratios_sorted,
-                        [](const auto &lhs, const auto &rhs) { return lhs.second < rhs.second; });
-      spdlog::info("[α={}] Sorted by miss ratio (ascending):", alpha);
-      for (const auto &[name, miss_ratio] : miss_ratios_sorted)
-        spdlog::info("[α={}] {}: {:.6f}%", alpha, name, miss_ratio * 100);
+      // Sort by trending coverage (descending)
+      std::vector<std::pair<std::string_view, double>> coverages_sorted(coverages[alpha].begin(),
+                                                                        coverages[alpha].end());
+      std::ranges::sort(coverages_sorted,
+                        [](const auto &lhs, const auto &rhs) { return lhs.second > rhs.second; });
+      spdlog::info("[α={}] Sorted by trending coverage (descending):", alpha);
+      for (const auto &[name, coverage] : coverages_sorted)
+        spdlog::info("[α={}] {}: {:.6f}%", alpha, name, coverage * 100);
       std::println();
     }
   }
@@ -393,7 +390,7 @@ BENCHMARK("hm") {
       tabulate::Table::Row_t row;
       for (const auto &cell : rows)
         if (std::holds_alternative<double>(cell)) {
-          if (type == "miss_ratio")
+          if (type == "coverage")
             row.emplace_back(std::format("{:.6f}%", std::get<double>(cell) * 100));
           else
             row.emplace_back(std::format("{:.6f}MOps", 1.0 / std::get<double>(cell) / 1'000'000));
