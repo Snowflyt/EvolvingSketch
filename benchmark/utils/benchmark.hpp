@@ -110,7 +110,7 @@ public:
   template <ConvertibleToString... Args> void benchmark(const std::string &name, Args &&...args) {
     const std::vector<std::string> arguments{convert_to_string(std::forward<Args>(args))...};
 
-    auto benchmark_func = [&, arguments = arguments]() {
+    auto benchmark_func = [this, name = std::string(name), arguments = arguments]() {
       reproc::process process;
 
       reproc::options opts;

@@ -31,6 +31,7 @@ using V = uint64_t;
 struct Args {
   std::string trace_path;
   size_t cache_size;
+  size_t adapt_interval;
   double alpha;
   bool progress;
   bool record_adaptation_history;
@@ -40,6 +41,9 @@ auto parse_args(int argc, char **argv) -> Args {
   argparse::ArgumentParser program;
   program.add_argument("trace_path").help("The path to the cache trace file");
   program.add_argument("cache_size").help("The cache size").scan<'u', size_t>();
+  program.add_argument("adapt_interval")
+      .help("The interval of adaptation (only used by EvolvingSketch)")
+      .scan<'u', size_t>();
   program.add_argument("alpha")
       .help("The initial alpha value for time-decaying sketches")
       .scan<'g', double>();
@@ -53,6 +57,7 @@ auto parse_args(int argc, char **argv) -> Args {
     return {
         .trace_path = program.get<std::string>("trace_path"),
         .cache_size = program.get<size_t>("cache_size"),
+        .adapt_interval = program.get<size_t>("adapt_interval"),
         .alpha = program.get<double>("alpha"),
         .progress = program.get<bool>("--progress"),
         .record_adaptation_history = program.get<bool>("--record-adaptation-history"),
@@ -143,17 +148,17 @@ REGISTER_BENCHMARK_TASK("W-TinyLFU_EVO") {
   const Args args = parse_args(argc, argv);
 
   EpsilonGreedyAdapter adapter{0.1, 1000.0, 100, 0.1, 0.99};
-  constexpr uint32_t ADAPT_INTERVAL = 100000;
 
   if (args.record_adaptation_history)
     adapter.start_recording_history();
 
   auto f2 = [](uint32_t t, double alpha) -> float { return f(t, alpha); };
   auto sketch = std::make_shared<EvolvingSketchOptim<K, decltype(f2)>>(
-      args.cache_size, EvolvingSketchOptimOptions{.initial_alpha = args.alpha,
-                                                  .f = f2,
-                                                  .adapter = &adapter,
-                                                  .adapt_interval = ADAPT_INTERVAL});
+      args.cache_size,
+      EvolvingSketchOptimOptions{.initial_alpha = args.alpha,
+                                 .f = f2,
+                                 .adapter = &adapter,
+                                 .adapt_interval = static_cast<uint32_t>(args.adapt_interval)});
   WTinyLFUPolicy<K, V, EvolvingSketchOptim<K, decltype(f2)>> policy{args.cache_size, sketch};
 
   const double miss_ratio = benchmark(policy, args, [&]() { sketch->hit_count++; });

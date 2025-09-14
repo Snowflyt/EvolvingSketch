@@ -24,6 +24,7 @@ struct Args {
   std::string trace_path;
   size_t cache_size;
   size_t top_k;
+  size_t adapt_interval;
   double alpha;
   bool progress;
   bool record_adaptation_history;
@@ -41,6 +42,9 @@ auto parse_args(int argc, char **argv) -> Args {
   program.add_argument("trace_path").help("The path to the cache trace file");
   program.add_argument("cache_size").help("The cache size").scan<'u', size_t>();
   program.add_argument("top_k").help("The top-k value for the benchmark").scan<'u', size_t>();
+  program.add_argument("adapt_interval")
+      .help("The interval of adaptation (only used by EvolvingSketch)")
+      .scan<'u', size_t>();
   program.add_argument("alpha")
       .help("The initial alpha value for time-decaying sketches")
       .scan<'g', double>();
@@ -55,6 +59,7 @@ auto parse_args(int argc, char **argv) -> Args {
         .trace_path = program.get<std::string>("trace_path"),
         .cache_size = program.get<size_t>("cache_size"),
         .top_k = program.get<size_t>("top_k"),
+        .adapt_interval = program.get<size_t>("adapt_interval"),
         .alpha = program.get<double>("alpha"),
         .progress = program.get<bool>("--progress"),
         .record_adaptation_history = program.get<bool>("--record-adaptation-history"),
@@ -171,16 +176,16 @@ REGISTER_BENCHMARK_TASK("EVO") {
   const Args args = parse_args(argc, argv);
 
   SlidingWindowThompsonSamplingAdapter adapter(0.1, 10000.0, 100, 10.0, 500);
-  constexpr uint32_t ADAPT_INTERVAL = 100;
 
   if (args.record_adaptation_history)
     adapter.start_recording_history();
 
   auto f2 = [](uint32_t t, double alpha) -> float { return f(t, alpha); };
-  EvolvingSketchOptim<T, decltype(f2)> sketch(args.cache_size, {.initial_alpha = args.alpha,
-                                                                .f = f2,
-                                                                .adapter = &adapter,
-                                                                .adapt_interval = ADAPT_INTERVAL});
+  EvolvingSketchOptim<T, decltype(f2), double> sketch(
+      args.cache_size, {.initial_alpha = args.alpha,
+                        .f = f2,
+                        .adapter = &adapter,
+                        .adapt_interval = static_cast<uint32_t>(args.adapt_interval)});
 
   const double coverage = benchmark(sketch, args, [&]() { sketch.hit_count++; });
 

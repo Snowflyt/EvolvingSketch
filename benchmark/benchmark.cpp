@@ -31,6 +31,9 @@ BENCHMARK("caching") {
   program.add_argument("cache_size_ratio")
       .help("The ratio of the cache size to the number of unique objects in the trace")
       .scan<'g', double>();
+  program.add_argument("adapt_intervals")
+      .help("Comma-separated list of adaptation intervals to use (only used by EvolvingSketch) "
+            "(e.g., '1000,10000,100000')");
   program.add_argument("alphas").help(
       "Comma-separated list of alpha values to use (e.g., '0.1,0.2,0.3')");
   program.add_argument("-p", "--parallel")
@@ -41,14 +44,20 @@ BENCHMARK("caching") {
 
   std::string trace_path;
   double cache_size_ratio;
+  std::vector<size_t> adapt_intervals;
   std::vector<std::string> alphas;
   std::string output_path;
   try {
     program.parse_args(argc, argv);
     trace_path = program.get<decltype(trace_path)>("trace_path");
     cache_size_ratio = program.get<decltype(cache_size_ratio)>("cache_size_ratio");
-    options.parallel = program.get<bool>("--parallel");
+    adapt_intervals = fplus::fwd::apply(program.get<std::string>("adapt_intervals"),
+                                        fplus::fwd::split(',', false),
+                                        fplus::fwd::transform([](const std::string &s) {
+                                          return static_cast<size_t>(std::stoull(s));
+                                        }));
     alphas = fplus::split(',', false, program.get<std::string>("alphas"));
+    options.parallel = program.get<bool>("--parallel");
     output_path = program.get<decltype(output_path)>("--output");
   } catch (const std::exception &e) {
     throw usage_error(program.help().str(), e.what());
@@ -77,21 +86,29 @@ BENCHMARK("caching") {
   std::unordered_map<std::string, std::unordered_map<std::string, double>> miss_ratios;
   std::unordered_map<std::string, std::unordered_map<std::string, double>> update_avg_times;
   std::unordered_map<std::string, std::unordered_map<std::string, double>> estimate_avg_times;
-  std::mutex map_mutex;
 
-  on_benchmark_finished([&](const auto name, const auto &args, const std::vector<double> &results,
-                            const double time_spent) {
+  auto is_baseline_evolving_sketch = [](std::string_view baseline) {
+    return baseline == "EVO" || baseline.ends_with("_EVO") || baseline.ends_with("-EVO");
+  };
+
+  std::mutex map_mutex;
+  on_benchmark_finished([&](const auto baseline, const auto &args,
+                            const std::vector<double> &results, const double time_spent) {
     std::lock_guard<std::mutex> lock(map_mutex);
 
-    const std::string &alpha = args[2];
+    const std::string name = is_baseline_evolving_sketch(baseline)
+                                 ? std::format("{} (Ia={})", baseline, args[2])
+                                 : std::string(baseline);
+    const std::string &alpha = args[3];
+
     const double miss_ratio = results[0];
     const double update_time_avg_seconds = results[1];
     const double estimate_time_avg_seconds = results[2];
 
-    miss_ratios[alpha][std::string(name)] = miss_ratio;
+    miss_ratios[alpha][name] = miss_ratio;
     if (update_time_avg_seconds != 0.0) {
-      update_avg_times[alpha][std::string(name)] = update_time_avg_seconds;
-      estimate_avg_times[alpha][std::string(name)] = estimate_time_avg_seconds;
+      update_avg_times[alpha][name] = update_time_avg_seconds;
+      estimate_avg_times[alpha][name] = estimate_time_avg_seconds;
     }
     spdlog::info(
         "[α={}] {}: (Miss Ratio) {:.6f}%{} ({:.6f}s elapsed)", alpha, name, miss_ratio * 100,
@@ -102,10 +119,24 @@ BENCHMARK("caching") {
         time_spent);
   });
 
+  auto run_benchmarks = [&](const std::string &alpha) {
+    std::vector<std::string> other_benchmark_names;
+    std::string evolving_sketch_benchmark_name;
+    for (const std::string &name : enabled_benchmark_names())
+      if (is_baseline_evolving_sketch(name))
+        evolving_sketch_benchmark_name = name;
+      else
+        other_benchmark_names.push_back(name);
+    for (const std::string &name : other_benchmark_names)
+      benchmark(name, trace_path, cache_size, 10, alpha);
+    for (size_t adapt_interval : adapt_intervals)
+      benchmark(evolving_sketch_benchmark_name, trace_path, cache_size, adapt_interval, alpha);
+  };
+
   if (options.parallel) {
     for (const auto &alpha : alphas) {
       spdlog::info("Running benchmark with α={}...", alpha);
-      benchmark_all(trace_path, cache_size, alpha);
+      run_benchmarks(alpha);
     }
 
     wait();
@@ -126,7 +157,7 @@ BENCHMARK("caching") {
     for (const auto &alpha : alphas) {
       spdlog::info("Running benchmark with α={}...", alpha);
 
-      benchmark_all(trace_path, cache_size, alpha);
+      run_benchmarks(alpha);
       wait();
       std::println();
 
@@ -150,6 +181,20 @@ BENCHMARK("caching") {
           {"estimate_avg_time_s", "Average Estimate Time by Seconds", estimate_avg_times},
       };
 
+  auto output_benchmark_names = [&]() {
+    std::vector<std::string> benchmark_names;
+    std::string evolving_sketch_benchmark_name;
+    for (const std::string &name : enabled_benchmark_names())
+      if (is_baseline_evolving_sketch(name))
+        evolving_sketch_benchmark_name = name;
+      else
+        benchmark_names.push_back(name);
+    for (size_t adapt_interval : adapt_intervals)
+      benchmark_names.push_back(
+          std::format("{} (Ia={})", evolving_sketch_benchmark_name, adapt_interval));
+    return benchmark_names;
+  };
+
   std::unordered_map<std::string, std::vector<std::vector<std::variant<double, std::string>>>>
       results;
   for (const auto &[type, _, map] : result_maps) {
@@ -157,7 +202,7 @@ BENCHMARK("caching") {
     for (const auto &alpha : alphas) {
       std::vector<std::variant<double, std::string>> row;
       row.emplace_back(alpha);
-      for (const auto &name : enabled_benchmark_names()) {
+      for (const auto &name : output_benchmark_names()) {
         if (const auto it = map.find(alpha); it != map.end())
           if (const auto it2 = it->second.find(name); it2 != it->second.end())
             row.emplace_back(it2->second);
@@ -176,7 +221,7 @@ BENCHMARK("caching") {
     std::println("{}{}:", type == std::get<0>(result_maps[0]) ? "" : "\n", desc);
     tabulate::Table table;
     tabulate::Table::Row_t header{"Alpha"};
-    for (const auto &name : enabled_benchmark_names())
+    for (const auto &name : output_benchmark_names())
       header.emplace_back(name);
     table.add_row(header);
     for (const auto &rows : results[type]) {
@@ -217,7 +262,7 @@ BENCHMARK("caching") {
     if (!output_file.is_open())
       throw std::runtime_error("Failed to open output file: " + output_path);
     std::println(output_file, "{}",
-                 "type,alpha," + fplus::join_elem(',', enabled_benchmark_names()));
+                 "type,alpha," + fplus::join_elem(',', output_benchmark_names()));
     for (const auto &[type, rows] : results)
       for (const auto &row : rows)
         std::println(output_file, "{},{}", type,
@@ -239,6 +284,9 @@ BENCHMARK("hm") {
       .help("The ratio of the cache size to the number of unique objects in the trace")
       .scan<'g', double>();
   program.add_argument("top_k").help("The number of top results to return").scan<'u', size_t>();
+  program.add_argument("adapt_intervals")
+      .help("Comma-separated list of adaptation intervals to use (only used by EvolvingSketch) "
+            "(e.g., '1000,10000,100000')");
   program.add_argument("alphas").help(
       "Comma-separated list of alpha values to use (e.g., '0.1,0.2,0.3')");
   program.add_argument("-p", "--parallel")
@@ -250,6 +298,7 @@ BENCHMARK("hm") {
   std::string trace_path;
   double cache_size_ratio;
   size_t top_k;
+  std::vector<size_t> adapt_intervals;
   std::vector<std::string> alphas;
   std::string output_path;
   try {
@@ -257,8 +306,13 @@ BENCHMARK("hm") {
     trace_path = program.get<decltype(trace_path)>("trace_path");
     cache_size_ratio = program.get<decltype(cache_size_ratio)>("cache_size_ratio");
     top_k = program.get<decltype(top_k)>("top_k");
-    options.parallel = program.get<bool>("--parallel");
+    adapt_intervals = fplus::fwd::apply(program.get<std::string>("adapt_intervals"),
+                                        fplus::fwd::split(',', false),
+                                        fplus::fwd::transform([](const std::string &s) {
+                                          return static_cast<size_t>(std::stoull(s));
+                                        }));
     alphas = fplus::split(',', false, program.get<std::string>("alphas"));
+    options.parallel = program.get<bool>("--parallel");
     output_path = program.get<decltype(output_path)>("--output");
   } catch (const std::exception &e) {
     throw usage_error(program.help().str(), e.what());
@@ -287,20 +341,28 @@ BENCHMARK("hm") {
   std::unordered_map<std::string, std::unordered_map<std::string, double>> coverages;
   std::unordered_map<std::string, std::unordered_map<std::string, double>> update_avg_times;
   std::unordered_map<std::string, std::unordered_map<std::string, double>> estimate_avg_times;
-  std::mutex map_mutex;
 
-  on_benchmark_finished([&](const auto name, const auto &args, const std::vector<double> &results,
-                            const double time_spent) {
+  auto is_baseline_evolving_sketch = [](std::string_view baseline) {
+    return baseline == "EVO" || baseline.ends_with("_EVO") || baseline.ends_with("-EVO");
+  };
+
+  std::mutex map_mutex;
+  on_benchmark_finished([&](const auto baseline, const auto &args,
+                            const std::vector<double> &results, const double time_spent) {
     std::lock_guard<std::mutex> lock(map_mutex);
 
-    const std::string &alpha = args[3];
+    const std::string name = is_baseline_evolving_sketch(baseline)
+                                 ? std::format("{} (Ia={})", baseline, args[3])
+                                 : std::string(baseline);
+    const std::string &alpha = args[4];
+
     const double coverage = results[0];
     const double update_time_avg_seconds = results[1];
     const double estimate_time_avg_seconds = results[2];
 
-    coverages[alpha][std::string(name)] = coverage;
-    update_avg_times[alpha][std::string(name)] = update_time_avg_seconds;
-    estimate_avg_times[alpha][std::string(name)] = estimate_time_avg_seconds;
+    coverages[alpha][name] = coverage;
+    update_avg_times[alpha][name] = update_time_avg_seconds;
+    estimate_avg_times[alpha][name] = estimate_time_avg_seconds;
     spdlog::info(
         "[α={}] {}: (Coverage) {:.6f}%, (Update) {:.6f}MOps, (Estimate) {:.6f}MOps ({:.6f}s "
         "elapsed)",
@@ -309,17 +371,32 @@ BENCHMARK("hm") {
         1.0 / estimate_time_avg_seconds / 1'000'000, time_spent);
   });
 
+  auto run_benchmarks = [&](const std::string &alpha) {
+    std::vector<std::string> other_benchmark_names;
+    std::string evolving_sketch_benchmark_name;
+    for (const std::string &name : enabled_benchmark_names())
+      if (is_baseline_evolving_sketch(name))
+        evolving_sketch_benchmark_name = name;
+      else
+        other_benchmark_names.push_back(name);
+    for (const std::string &name : other_benchmark_names)
+      benchmark(name, trace_path, cache_size, top_k, 0, alpha);
+    for (size_t adapt_interval : adapt_intervals)
+      benchmark(evolving_sketch_benchmark_name, trace_path, cache_size, top_k, adapt_interval,
+                alpha);
+  };
+
   if (options.parallel) {
     for (const auto &alpha : alphas) {
       spdlog::info("Running H&M Trending (k={}) benchmark with α={}...", top_k, alpha);
-      benchmark_all(trace_path, cache_size, top_k, alpha);
+      run_benchmarks(alpha);
     }
 
     wait();
     std::println();
 
     for (const auto &alpha : alphas) {
-      // Sort by trending coverage (descending)
+      // Sort by trending coverage (ascending)
       std::vector<std::pair<std::string_view, double>> coverages_sorted(coverages[alpha].begin(),
                                                                         coverages[alpha].end());
       std::ranges::sort(coverages_sorted,
@@ -333,7 +410,7 @@ BENCHMARK("hm") {
     for (const auto &alpha : alphas) {
       spdlog::info("Running H&M Trending (k={}) benchmark with α={}...", top_k, alpha);
 
-      benchmark_all(trace_path, cache_size, top_k, alpha);
+      run_benchmarks(alpha);
       wait();
       std::println();
 
@@ -357,6 +434,20 @@ BENCHMARK("hm") {
           {"estimate_avg_time_s", "Average Estimate Time by Seconds", estimate_avg_times},
       };
 
+  auto output_benchmark_names = [&]() {
+    std::vector<std::string> benchmark_names;
+    std::string evolving_sketch_benchmark_name;
+    for (const std::string &name : enabled_benchmark_names())
+      if (is_baseline_evolving_sketch(name))
+        evolving_sketch_benchmark_name = name;
+      else
+        benchmark_names.push_back(name);
+    for (size_t adapt_interval : adapt_intervals)
+      benchmark_names.push_back(
+          std::format("{} (Ia={})", evolving_sketch_benchmark_name, adapt_interval));
+    return benchmark_names;
+  };
+
   std::unordered_map<std::string, std::vector<std::vector<std::variant<double, std::string>>>>
       results;
   for (const auto &[type, _, map] : result_maps) {
@@ -364,7 +455,7 @@ BENCHMARK("hm") {
     for (const auto &alpha : alphas) {
       std::vector<std::variant<double, std::string>> row;
       row.emplace_back(alpha);
-      for (const auto &name : enabled_benchmark_names()) {
+      for (const auto &name : output_benchmark_names()) {
         if (const auto it = map.find(alpha); it != map.end())
           if (const auto it2 = it->second.find(name); it2 != it->second.end())
             row.emplace_back(it2->second);
@@ -383,7 +474,7 @@ BENCHMARK("hm") {
     std::println("{}{}:", type == std::get<0>(result_maps[0]) ? "" : "\n", desc);
     tabulate::Table table;
     tabulate::Table::Row_t header{"Alpha"};
-    for (const auto &name : enabled_benchmark_names())
+    for (const auto &name : output_benchmark_names())
       header.emplace_back(name);
     table.add_row(header);
     for (const auto &rows : results[type]) {
@@ -424,7 +515,7 @@ BENCHMARK("hm") {
     if (!output_file.is_open())
       throw std::runtime_error("Failed to open output file: " + output_path);
     std::println(output_file, "{}",
-                 "type,alpha," + fplus::join_elem(',', enabled_benchmark_names()));
+                 "type,alpha," + fplus::join_elem(',', output_benchmark_names()));
     for (const auto &[type, rows] : results)
       for (const auto &row : rows)
         std::println(output_file, "{},{}", type,
