@@ -12,16 +12,12 @@
 
 #include "adapter.hpp"
 
-inline constexpr double MIN_PARAM = 0.1;
-inline constexpr double MAX_PARAM = 1000.0;
-inline constexpr size_t NUM_ARMS = 100;
 inline constexpr double EPSILON = 0.1; // Exploration rate
 
 class EpsilonGreedyAdapter : public Adapter<double, double> {
 public:
   explicit EpsilonGreedyAdapter(
-      const double min_param = MIN_PARAM, const double max_param = MAX_PARAM,
-      const size_t num_arms = NUM_ARMS, const double epsilon = EPSILON,
+      double min_param, double max_param, size_t num_arms, double epsilon = EPSILON,
       std::variant<double, std::function<double(const size_t n)>> step =
           [](const size_t n) { return 1.0 / static_cast<double>(n); })
       : k_num_arms_(num_arms), k_epsilon_(epsilon),

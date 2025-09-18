@@ -24,13 +24,13 @@ struct EvolvingSketchOptimOptions {
 };
 
 /**
- * @brief A variant of Evolving Sketch designed specially for hit rate optimization
+ * @brief A variant of Evolving Sketch designed specially for hit rate (or similar) optimization
  * that may have better performance than regular Evolving Sketch.
  *
  * Note that this version only performs better performance than regular Evolving Sketch when
  * adaptation is enabled (i.e., adapter is not nullptr).
  */
-template <typename T, typename F>
+template <typename T, typename F, typename SumType = size_t>
   requires std::is_invocable_r_v<float, F, uint32_t, double>
 class EvolvingSketchOptim {
 private:
@@ -40,7 +40,7 @@ private:
 
 public:
   // NOLINTNEXTLINE
-  size_t hit_count = 0;
+  SumType sum = 0;
 
   explicit EvolvingSketchOptim(const size_t size, const EvolvingSketchOptimOptions<F> &options)
       : k_width_(std::bit_ceil(std::max(size / 4, 8UZ))),
@@ -273,10 +273,9 @@ private:
    */
   void adapt() {
     prune();
-    const double hit_ratio =
-        static_cast<double>(hit_count) / static_cast<double>(k_adapt_interval_);
-    hit_count = 0; // Reset for the next interval
-    alpha_ = (*k_adapter_)(hit_ratio, alpha_);
+    const double normalized_sum = static_cast<double>(sum) / static_cast<double>(k_adapt_interval_);
+    sum = 0; // Reset for the next interval
+    alpha_ = (*k_adapter_)(normalized_sum, alpha_);
     adapt_counter_ = 0;
   }
 };

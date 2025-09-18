@@ -338,7 +338,7 @@ BENCHMARK("hm") {
   }
 
   // Benchmark
-  std::unordered_map<std::string, std::unordered_map<std::string, double>> coverages;
+  std::unordered_map<std::string, std::unordered_map<std::string, double>> dcgs;
   std::unordered_map<std::string, std::unordered_map<std::string, double>> update_avg_times;
   std::unordered_map<std::string, std::unordered_map<std::string, double>> estimate_avg_times;
 
@@ -356,19 +356,18 @@ BENCHMARK("hm") {
                                  : std::string(baseline);
     const std::string &alpha = args[4];
 
-    const double coverage = results[0];
+    const double dcg = results[0];
     const double update_time_avg_seconds = results[1];
     const double estimate_time_avg_seconds = results[2];
 
-    coverages[alpha][name] = coverage;
+    dcgs[alpha][name] = dcg;
     update_avg_times[alpha][name] = update_time_avg_seconds;
     estimate_avg_times[alpha][name] = estimate_time_avg_seconds;
     spdlog::info(
-        "[α={}] {}: (Coverage) {:.6f}%, (Update) {:.6f}MOps, (Estimate) {:.6f}MOps ({:.6f}s "
-        "elapsed)",
+        "[α={}] {}: (DCG) {:.6f}, (Update) {:.6f}MOps, (Estimate) {:.6f}MOps ({:.6f}s elapsed)",
         fplus::trim_right('.', fplus::trim_right('0', std::format("{:f}", std::stod(alpha)))), name,
-        coverage * 100, 1.0 / update_time_avg_seconds / 1'000'000,
-        1.0 / estimate_time_avg_seconds / 1'000'000, time_spent);
+        dcg, 1.0 / update_time_avg_seconds / 1'000'000, 1.0 / estimate_time_avg_seconds / 1'000'000,
+        time_spent);
   });
 
   auto run_benchmarks = [&](const std::string &alpha) {
@@ -396,14 +395,14 @@ BENCHMARK("hm") {
     std::println();
 
     for (const auto &alpha : alphas) {
-      // Sort by trending coverage (ascending)
-      std::vector<std::pair<std::string_view, double>> coverages_sorted(coverages[alpha].begin(),
-                                                                        coverages[alpha].end());
-      std::ranges::sort(coverages_sorted,
+      // Sort by DCG (descending)
+      std::vector<std::pair<std::string_view, double>> dcgs_sorted(dcgs[alpha].begin(),
+                                                                   dcgs[alpha].end());
+      std::ranges::sort(dcgs_sorted,
                         [](const auto &lhs, const auto &rhs) { return lhs.second > rhs.second; });
-      spdlog::info("[α={}] Sorted by trending coverage (descending):", alpha);
-      for (const auto &[name, coverage] : coverages_sorted)
-        spdlog::info("[α={}] {}: {:.6f}%", alpha, name, coverage * 100);
+      spdlog::info("[α={}] Sorted by DCG (descending):", alpha);
+      for (const auto &[name, dcg] : dcgs_sorted)
+        spdlog::info("[α={}] {}: {:.6f}", alpha, name, dcg);
       std::println();
     }
   } else {
@@ -414,14 +413,14 @@ BENCHMARK("hm") {
       wait();
       std::println();
 
-      // Sort by trending coverage (descending)
-      std::vector<std::pair<std::string_view, double>> coverages_sorted(coverages[alpha].begin(),
-                                                                        coverages[alpha].end());
-      std::ranges::sort(coverages_sorted,
+      // Sort by DCG (descending)
+      std::vector<std::pair<std::string_view, double>> dcgs_sorted(dcgs[alpha].begin(),
+                                                                   dcgs[alpha].end());
+      std::ranges::sort(dcgs_sorted,
                         [](const auto &lhs, const auto &rhs) { return lhs.second > rhs.second; });
-      spdlog::info("[α={}] Sorted by trending coverage (descending):", alpha);
-      for (const auto &[name, coverage] : coverages_sorted)
-        spdlog::info("[α={}] {}: {:.6f}%", alpha, name, coverage * 100);
+      spdlog::info("[α={}] Sorted by DCG (descending):", alpha);
+      for (const auto &[name, dcg] : dcgs_sorted)
+        spdlog::info("[α={}] {}: {:.6f}", alpha, name, dcg);
       std::println();
     }
   }
@@ -429,7 +428,7 @@ BENCHMARK("hm") {
   std::vector<std::tuple<std::string, std::string,
                          std::unordered_map<std::string, std::unordered_map<std::string, double>>>>
       result_maps = {
-          {"coverage", "Trending Coverages", coverages},
+          {"dcg", "DCG", dcgs},
           {"update_avg_time_s", "Average Update Time by Seconds", update_avg_times},
           {"estimate_avg_time_s", "Average Estimate Time by Seconds", estimate_avg_times},
       };
@@ -481,8 +480,8 @@ BENCHMARK("hm") {
       tabulate::Table::Row_t row;
       for (const auto &cell : rows)
         if (std::holds_alternative<double>(cell)) {
-          if (type == "coverage")
-            row.emplace_back(std::format("{:.6f}%", std::get<double>(cell) * 100));
+          if (type == "dcg")
+            row.emplace_back(std::format("{:.6f}", std::get<double>(cell)));
           else
             row.emplace_back(std::format("{:.6f}MOps", 1.0 / std::get<double>(cell) / 1'000'000));
         } else {

@@ -2,14 +2,14 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
-#include <queue>
+#include <set>
 #include <string>
 #include <type_traits>
-#include <unordered_set>
+#include <unordered_map>
 
 #include <argparse/argparse.hpp>
 
-#include "../../src/adapters/SlidingWindowThompsonSamplingAdapter.hpp"
+#include "../../src/adapters/EpsilonGreedyAdapter.hpp"
 #include "../../src/sketch.hpp"
 #include "../baselines/AdaSketch.hpp"
 #include "../baselines/CountMinSketch.hpp"
@@ -30,10 +30,12 @@ struct Args {
   bool record_adaptation_history;
 };
 
-struct MinFreqCompare {
-  auto operator()(std::pair<uint32_t, uint32_t> const &a,
-                  std::pair<uint32_t, uint32_t> const &b) const -> bool {
-    return a.second > b.second;
+template <typename Freq> struct FreqCompare {
+  auto operator()(const std::pair</* product_code */ uint32_t, /* freq */ Freq> &a,
+                  const std::pair</* product_code */ uint32_t, /* freq */ Freq> &b) const -> bool {
+    if (a.second != b.second)
+      return a.second > b.second;
+    return a.first < b.first;
   }
 };
 
@@ -70,65 +72,65 @@ auto parse_args(int argc, char **argv) -> Args {
 }
 
 struct Noop0 {
-  void operator()() const noexcept {}
+  void operator()(size_t rank) const noexcept {}
 };
 
 template <typename Sketch, typename OnHit = Noop0>
-  requires std::is_invocable_r_v<void, OnHit>
+  requires std::is_invocable_r_v<void, OnHit, size_t>
 auto benchmark(Sketch &sketch, const Args &args, OnHit on_hit = Noop0{}) -> double {
-  size_t hit_count = 0;
+  using Freq = decltype(sketch.estimate(0));
+
+  double dcg = 0;
 
   const TransactionTrace trace(args.trace_path);
 
   size_t progress = 0;
 
-  std::unordered_set<uint32_t> top_k_set;
-  std::priority_queue<std::pair<uint32_t, uint32_t>, std::vector<std::pair<uint32_t, uint32_t>>,
-                      MinFreqCompare>
-      heap;
+  std::set<std::pair</* product_code */ uint32_t, /* freq */ Freq>, FreqCompare<Freq>> top_k;
+  std::unordered_map</* product_code */ uint32_t, /* freq */ Freq> product_code2freq_in_top_k;
 
   for (const auto &trans : trace) {
     const uint32_t product = trans.product_code;
 
-    if (top_k_set.contains(product)) {
-      hit_count++;
+    if (product_code2freq_in_top_k.contains(product)) {
+      size_t rank =
+          std::distance(top_k.begin(), top_k.find({product, product_code2freq_in_top_k[product]})) +
+          1;
+      dcg += 1.0 / std::log2(rank + 1);
       if constexpr (!std::same_as<OnHit, Noop0>)
-        on_hit();
+        on_hit(rank);
       sketch.update(product);
+      top_k.erase({product, product_code2freq_in_top_k[product]});
+      const auto freq = sketch.estimate(product);
+      product_code2freq_in_top_k[product] = freq;
+      top_k.emplace(product, freq);
       continue;
     }
 
     sketch.update(product);
-    const double freq = sketch.estimate(product);
+    const auto freq = sketch.estimate(product);
 
-    if (heap.size() < args.top_k) {
-      heap.emplace(product, freq);
-      top_k_set.insert(product);
+    if (top_k.size() < args.top_k) {
+      top_k.emplace(product, freq);
+      product_code2freq_in_top_k[product] = freq;
       continue;
     }
 
-    // if (freq > heap.top().second) {
-    //   auto [poppedIP, _] = heap.top();
-    //   heap.pop();
-    //   heap.emplace(ip, freq);
-    //   top_k_set.erase(poppedIP);
-    //   top_k_set.insert(ip);
-    // }
-
-    // Try swapping out the smallest element in the heap
+    // Try swapping out the smallest element in the set
     size_t tries = 0; // Avoid too many iterations
-    while (freq > heap.top().second && tries++ < args.top_k) {
-      auto [popped_product_code, _] = heap.top();
-      heap.pop();
+    while (freq > top_k.rbegin()->second && tries++ < args.top_k) {
+      const auto [popped_product_code, popped_stale_freq] = *top_k.rbegin();
+      top_k.erase({popped_product_code, popped_stale_freq});
 
-      const double latest_freq = sketch.estimate(popped_product_code);
+      const auto latest_freq = sketch.estimate(popped_product_code);
 
       if (latest_freq >= freq) {
-        heap.emplace(popped_product_code, latest_freq);
+        top_k.emplace(popped_product_code, latest_freq);
+        product_code2freq_in_top_k[popped_product_code] = latest_freq;
       } else {
-        heap.emplace(product, freq);
-        top_k_set.erase(popped_product_code);
-        top_k_set.insert(product);
+        top_k.emplace(product, freq);
+        product_code2freq_in_top_k.erase(popped_product_code);
+        product_code2freq_in_top_k[product] = freq;
         break;
       }
     }
@@ -137,9 +139,18 @@ auto benchmark(Sketch &sketch, const Args &args, OnHit on_hit = Noop0{}) -> doub
       std::cout << std::format("{:.4f}%", static_cast<double>(progress) /
                                               static_cast<double>(trace.size()) * 100)
                 << "\r" << std::flush;
+
+    // // Print top 50
+    // if (args.progress && progress++ % 1'000'000 == 0) {
+    //   for (size_t i = 0; i < 50 && i < top_k.size(); i++) {
+    //     const auto &[product, freq] = *std::next(top_k.begin(), i);
+    //     std::println("{}: product={}, freq={}", i, product, freq);
+    //   }
+    //   std::println();
+    // }
   }
 
-  return static_cast<double>(hit_count) / static_cast<double>(trace.size());
+  return dcg;
 }
 
 auto f(const uint32_t t, const double alpha) -> float {
@@ -149,33 +160,31 @@ auto f(const uint32_t t, const double alpha) -> float {
 REGISTER_BENCHMARK_TASK("CMS") {
   const Args args = parse_args(argc, argv);
   CountMinSketch<T> sketch(args.cache_size);
-  const double coverage = benchmark(sketch, args);
-  return std::vector{coverage, sketch.update_time_avg_seconds(),
-                     sketch.estimate_time_avg_seconds()};
+  const double dcg = benchmark(sketch, args);
+  return std::vector{dcg, sketch.update_time_avg_seconds(), sketch.estimate_time_avg_seconds()};
 }
 
 REGISTER_BENCHMARK_TASK("ADA") {
   const Args args = parse_args(argc, argv);
   auto f2 = [alpha = args.alpha](uint32_t t) -> float { return f(t, alpha); };
   AdaSketch<T, decltype(f2)> sketch(args.cache_size, AdaSketchOptions<decltype(f2)>{.f = f2});
-  const double coverage = benchmark(sketch, args);
-  return std::vector{coverage, sketch.update_time_avg_seconds(),
-                     sketch.estimate_time_avg_seconds()};
+  const double dcg = benchmark(sketch, args);
+  return std::vector{dcg, sketch.update_time_avg_seconds(), sketch.estimate_time_avg_seconds()};
 }
 
 REGISTER_BENCHMARK_TASK("EVO_PRUNING_ONLY") {
   const Args args = parse_args(argc, argv);
   auto f2 = [](uint32_t t, double alpha) -> float { return f(t, alpha); };
   EvolvingSketch<T, decltype(f2)> sketch(args.cache_size, {.initial_alpha = args.alpha, .f = f2});
-  const double coverage = benchmark(sketch, args);
-  return std::vector{coverage, sketch.update_time_avg_seconds(),
-                     sketch.estimate_time_avg_seconds()};
+  const double dcg = benchmark(sketch, args);
+  return std::vector{dcg, sketch.update_time_avg_seconds(), sketch.estimate_time_avg_seconds()};
 }
 
 REGISTER_BENCHMARK_TASK("EVO") {
   const Args args = parse_args(argc, argv);
 
-  SlidingWindowThompsonSamplingAdapter adapter(0.1, 10000.0, 100, 10.0, 500);
+  // SlidingWindowThompsonSamplingAdapter adapter{0.01, 1000.0, 100, 10.0, 500};
+  EpsilonGreedyAdapter adapter{0.01, 1000.0, 100, 0.1, 0.99};
 
   if (args.record_adaptation_history)
     adapter.start_recording_history();
@@ -187,7 +196,8 @@ REGISTER_BENCHMARK_TASK("EVO") {
                         .adapter = &adapter,
                         .adapt_interval = static_cast<uint32_t>(args.adapt_interval)});
 
-  const double coverage = benchmark(sketch, args, [&]() { sketch.hit_count++; });
+  const double dcg =
+      benchmark(sketch, args, [&](size_t rank) { sketch.sum += 1.0 / std::log2(rank + 1); });
 
   if (args.record_adaptation_history)
     adapter.save_history(std::format(
@@ -195,8 +205,7 @@ REGISTER_BENCHMARK_TASK("EVO") {
         std::filesystem::path(args.trace_path).replace_extension().filename().string(),
         fplus::trim_right('.', fplus::trim_right('0', std::format("{:f}", args.alpha)))));
 
-  return std::vector{coverage, sketch.update_time_avg_seconds(),
-                     sketch.estimate_time_avg_seconds()};
+  return std::vector{dcg, sketch.update_time_avg_seconds(), sketch.estimate_time_avg_seconds()};
 }
 
 BENCHMARK_TASK_MAIN();

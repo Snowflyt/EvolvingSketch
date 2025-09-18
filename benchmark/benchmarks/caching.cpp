@@ -147,7 +147,7 @@ REGISTER_BENCHMARK_TASK("W-TinyLFU_EVO_PRUNING_ONLY") {
 REGISTER_BENCHMARK_TASK("W-TinyLFU_EVO") {
   const Args args = parse_args(argc, argv);
 
-  EpsilonGreedyAdapter adapter{0.1, 1000.0, 100, 0.1, 0.99};
+  EpsilonGreedyAdapter adapter{0.01, 1000.0, 100, 0.1, 0.99};
 
   if (args.record_adaptation_history)
     adapter.start_recording_history();
@@ -161,7 +161,7 @@ REGISTER_BENCHMARK_TASK("W-TinyLFU_EVO") {
                                  .adapt_interval = static_cast<uint32_t>(args.adapt_interval)});
   WTinyLFUPolicy<K, V, EvolvingSketchOptim<K, decltype(f2)>> policy{args.cache_size, sketch};
 
-  const double miss_ratio = benchmark(policy, args, [&]() { sketch->hit_count++; });
+  const double miss_ratio = benchmark(policy, args, [&]() { sketch->sum++; });
 
   if (args.record_adaptation_history)
     adapter.save_history(std::format(
