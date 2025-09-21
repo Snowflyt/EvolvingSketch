@@ -2,7 +2,10 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -27,7 +30,7 @@ struct Args {
   size_t adapt_interval;
   double alpha;
   bool progress;
-  bool record_adaptation_history;
+  std::string trace;
 };
 
 template <typename Freq> struct FreqCompare {
@@ -51,9 +54,10 @@ auto parse_args(int argc, char **argv) -> Args {
       .help("The initial alpha value for time-decaying sketches")
       .scan<'g', double>();
   program.add_argument("-p", "--progress").help("Show progress bar").flag();
-  program.add_argument("--record-adaptation-history")
-      .help("Record adaptation history for W-TinyLFU_EVO (does not affect other policies)")
-      .flag();
+  program.add_argument("--trace")
+      .help("The path to a CSV file where the objective history is saved at each adapt_interval. "
+            "For EVO, an additional 'parameter' (i.e., alpha) column is included.")
+      .default_value("");
 
   try {
     program.parse_args(argc, argv);
@@ -64,7 +68,7 @@ auto parse_args(int argc, char **argv) -> Args {
         .adapt_interval = program.get<size_t>("adapt_interval"),
         .alpha = program.get<double>("alpha"),
         .progress = program.get<bool>("--progress"),
-        .record_adaptation_history = program.get<bool>("--record-adaptation-history"),
+        .trace = program.get<std::string>("--trace"),
     };
   } catch (const std::exception &e) {
     throw usage_error(program.help().str(), e.what());
@@ -89,65 +93,213 @@ auto benchmark(Sketch &sketch, const Args &args, OnHit on_hit = Noop0{}) -> doub
   std::set<std::pair</* product_code */ uint32_t, /* freq */ Freq>, FreqCompare<Freq>> top_k;
   std::unordered_map</* product_code */ uint32_t, /* freq */ Freq> product_code2freq_in_top_k;
 
-  for (const auto &trans : trace) {
-    const uint32_t product = trans.product_code;
+  if (args.trace.empty()) {
+    for (const auto &trans : trace) {
+      const uint32_t product = trans.product_code;
 
-    if (product_code2freq_in_top_k.contains(product)) {
-      size_t rank =
-          std::distance(top_k.begin(), top_k.find({product, product_code2freq_in_top_k[product]})) +
-          1;
-      dcg += 1.0 / std::log2(rank + 1);
-      if constexpr (!std::same_as<OnHit, Noop0>)
-        on_hit(rank);
-      sketch.update(product);
-      top_k.erase({product, product_code2freq_in_top_k[product]});
-      const auto freq = sketch.estimate(product);
-      product_code2freq_in_top_k[product] = freq;
-      top_k.emplace(product, freq);
-      continue;
-    }
-
-    sketch.update(product);
-    const auto freq = sketch.estimate(product);
-
-    if (top_k.size() < args.top_k) {
-      top_k.emplace(product, freq);
-      product_code2freq_in_top_k[product] = freq;
-      continue;
-    }
-
-    // Try swapping out the smallest element in the set
-    size_t tries = 0; // Avoid too many iterations
-    while (freq > top_k.rbegin()->second && tries++ < args.top_k) {
-      const auto [popped_product_code, popped_stale_freq] = *top_k.rbegin();
-      top_k.erase({popped_product_code, popped_stale_freq});
-
-      const auto latest_freq = sketch.estimate(popped_product_code);
-
-      if (latest_freq >= freq) {
-        top_k.emplace(popped_product_code, latest_freq);
-        product_code2freq_in_top_k[popped_product_code] = latest_freq;
-      } else {
-        top_k.emplace(product, freq);
-        product_code2freq_in_top_k.erase(popped_product_code);
+      if (product_code2freq_in_top_k.contains(product)) {
+        size_t rank = std::distance(top_k.begin(),
+                                    top_k.find({product, product_code2freq_in_top_k[product]})) +
+                      1;
+        dcg += 1.0 / std::log2(rank + 1);
+        if constexpr (!std::same_as<OnHit, Noop0>)
+          on_hit(rank);
+        sketch.update(product);
+        top_k.erase({product, product_code2freq_in_top_k[product]});
+        const auto freq = sketch.estimate(product);
         product_code2freq_in_top_k[product] = freq;
-        break;
+        top_k.emplace(product, freq);
+
+        if (args.progress && progress++ % 1000 == 0)
+          std::cout << std::format("{:.4f}%", static_cast<double>(progress) /
+                                                  static_cast<double>(trace.size()) * 100)
+                    << "\r" << std::flush;
+
+        continue;
+      }
+
+      sketch.update(product);
+      const auto freq = sketch.estimate(product);
+
+      if (top_k.size() < args.top_k) {
+        top_k.emplace(product, freq);
+        product_code2freq_in_top_k[product] = freq;
+
+        if (args.progress && progress++ % 1000 == 0)
+          std::cout << std::format("{:.4f}%", static_cast<double>(progress) /
+                                                  static_cast<double>(trace.size()) * 100)
+                    << "\r" << std::flush;
+
+        continue;
+      }
+
+      // Try swapping out the smallest element in the set
+      size_t tries = 0; // Avoid too many iterations
+      while (freq > top_k.rbegin()->second && tries++ < args.top_k) {
+        const auto [popped_product_code, popped_stale_freq] = *top_k.rbegin();
+        top_k.erase({popped_product_code, popped_stale_freq});
+
+        const auto latest_freq = sketch.estimate(popped_product_code);
+
+        if (latest_freq >= freq) {
+          top_k.emplace(popped_product_code, latest_freq);
+          product_code2freq_in_top_k[popped_product_code] = latest_freq;
+        } else {
+          top_k.emplace(product, freq);
+          product_code2freq_in_top_k.erase(popped_product_code);
+          product_code2freq_in_top_k[product] = freq;
+          break;
+        }
+      }
+
+      if (args.progress && progress++ % 1000 == 0)
+        std::cout << std::format("{:.4f}%", static_cast<double>(progress) /
+                                                static_cast<double>(trace.size()) * 100)
+                  << "\r" << std::flush;
+
+      // // Print top 50
+      // if (args.progress && progress++ % 1'000'000 == 0) {
+      //   for (size_t i = 0; i < 50 && i < top_k.size(); i++) {
+      //     const auto &[product, freq] = *std::next(top_k.begin(), i);
+      //     std::println("{}: product={}, freq={}", i, product, freq);
+      //   }
+      //   std::println();
+      // }
+    }
+  } else {
+    double dcg_curr = 0;
+    std::vector<double> history;
+
+    for (const auto &trans : trace) {
+      const uint32_t product = trans.product_code;
+
+      if (product_code2freq_in_top_k.contains(product)) {
+        size_t rank = std::distance(top_k.begin(),
+                                    top_k.find({product, product_code2freq_in_top_k[product]})) +
+                      1;
+        dcg += 1.0 / std::log2(rank + 1);
+        dcg_curr += 1.0 / std::log2(rank + 1);
+        if constexpr (!std::same_as<OnHit, Noop0>)
+          on_hit(rank);
+        sketch.update(product);
+        top_k.erase({product, product_code2freq_in_top_k[product]});
+        const auto freq = sketch.estimate(product);
+        product_code2freq_in_top_k[product] = freq;
+        top_k.emplace(product, freq);
+
+        progress++;
+
+        if (progress % args.adapt_interval == 0) {
+          history.push_back(dcg_curr);
+          dcg_curr = 0;
+        }
+
+        if (args.progress && progress % 1000 == 0)
+          std::cout << std::format("{:.4f}%", static_cast<double>(progress) /
+                                                  static_cast<double>(trace.size()) * 100)
+                    << "\r" << std::flush;
+
+        continue;
+      }
+
+      sketch.update(product);
+      const auto freq = sketch.estimate(product);
+
+      if (top_k.size() < args.top_k) {
+        top_k.emplace(product, freq);
+        product_code2freq_in_top_k[product] = freq;
+
+        progress++;
+
+        if (progress % args.adapt_interval == 0) {
+          history.push_back(dcg_curr);
+          dcg_curr = 0;
+        }
+
+        if (args.progress && progress % 1000 == 0)
+          std::cout << std::format("{:.4f}%", static_cast<double>(progress) /
+                                                  static_cast<double>(trace.size()) * 100)
+                    << "\r" << std::flush;
+
+        continue;
+      }
+
+      // Try swapping out the smallest element in the set
+      size_t tries = 0; // Avoid too many iterations
+      while (freq > top_k.rbegin()->second && tries++ < args.top_k) {
+        const auto [popped_product_code, popped_stale_freq] = *top_k.rbegin();
+        top_k.erase({popped_product_code, popped_stale_freq});
+
+        const auto latest_freq = sketch.estimate(popped_product_code);
+
+        if (latest_freq >= freq) {
+          top_k.emplace(popped_product_code, latest_freq);
+          product_code2freq_in_top_k[popped_product_code] = latest_freq;
+        } else {
+          top_k.emplace(product, freq);
+          product_code2freq_in_top_k.erase(popped_product_code);
+          product_code2freq_in_top_k[product] = freq;
+          break;
+        }
+      }
+
+      progress++;
+
+      if (progress % args.adapt_interval == 0) {
+        history.push_back(dcg_curr);
+        dcg_curr = 0;
+      }
+
+      if (args.progress && progress % 1000 == 0)
+        std::cout << std::format("{:.4f}%", static_cast<double>(progress) /
+                                                static_cast<double>(trace.size()) * 100)
+                  << "\r" << std::flush;
+
+      // // Print top 50
+      // if (args.progress && progress++ % 1'000'000 == 0) {
+      //   for (size_t i = 0; i < 50 && i < top_k.size(); i++) {
+      //     const auto &[product, freq] = *std::next(top_k.begin(), i);
+      //     std::println("{}: product={}, freq={}", i, product, freq);
+      //   }
+      //   std::println();
+      // }
+    }
+
+    std::ofstream file(args.trace);
+    if (!file.is_open())
+      throw std::runtime_error("Failed to open file for writing trace history: " + args.trace);
+
+    file << "objective\n";
+    // Auto burn-in: estimate number of initial intervals to drop where the top-k list is still
+    // under-filled and the catalog coverage is tiny. Heuristic based on cache/top_k and
+    // unique_products: skip intervals until both conditions likely satisfied.
+    // We approximate via a simple function of counts available at this point.
+    size_t burn = 0;
+    // Target: top_k at least 90% filled and cumulative distinct >= 10% of cache_size.
+    // Since we don't persist per-interval metadata here, we approximate with:
+    // burn_intervals ≈ max(ceil(0.1 * args.cache_size / args.top_k), 5)
+    // and also a floor based on unique-products ratio.
+    const auto approx1 = static_cast<size_t>(
+        std::ceil(0.1 * static_cast<double>(args.cache_size) / static_cast<double>(args.top_k)));
+    const size_t approx_min = 5;
+    burn = std::max(approx1, approx_min);
+    // Also scale by unique_products/cache_size ratio to avoid excessive burn on tiny traces
+    const TransactionTrace trace(args.trace_path);
+    const size_t unique_products = count_unique_products(trace);
+    if (unique_products > 0) {
+      const double ratio = static_cast<double>(unique_products) /
+                           std::max(1.0, static_cast<double>(args.cache_size));
+      if (ratio < 5.0) {
+        const auto up = static_cast<double>(unique_products);
+        const auto tk = std::max(1.0, static_cast<double>(args.top_k));
+        burn = std::max(burn, static_cast<size_t>(std::ceil(0.02 * up / tk)));
       }
     }
+    burn = std::min(burn, history.size());
+    for (size_t i = burn; i < history.size(); ++i)
+      file << std::format("{}\n", history[i]);
 
-    if (args.progress && progress++ % 1000 == 0)
-      std::cout << std::format("{:.4f}%", static_cast<double>(progress) /
-                                              static_cast<double>(trace.size()) * 100)
-                << "\r" << std::flush;
-
-    // // Print top 50
-    // if (args.progress && progress++ % 1'000'000 == 0) {
-    //   for (size_t i = 0; i < 50 && i < top_k.size(); i++) {
-    //     const auto &[product, freq] = *std::next(top_k.begin(), i);
-    //     std::println("{}: product={}, freq={}", i, product, freq);
-    //   }
-    //   std::println();
-    // }
+    file.close();
   }
 
   return dcg;
@@ -186,7 +338,7 @@ REGISTER_BENCHMARK_TASK("EVO") {
   // SlidingWindowThompsonSamplingAdapter adapter{0.01, 1000.0, 100, 10.0, 500};
   EpsilonGreedyAdapter adapter{0.01, 1000.0, 100, 0.1, 0.99};
 
-  if (args.record_adaptation_history)
+  if (!args.trace.empty())
     adapter.start_recording_history();
 
   auto f2 = [](uint32_t t, double alpha) -> float { return f(t, alpha); };
@@ -196,14 +348,13 @@ REGISTER_BENCHMARK_TASK("EVO") {
                         .adapter = &adapter,
                         .adapt_interval = static_cast<uint32_t>(args.adapt_interval)});
 
-  const double dcg =
-      benchmark(sketch, args, [&](size_t rank) { sketch.sum += 1.0 / std::log2(rank + 1); });
+  Args benchmark_args = args;
+  benchmark_args.trace = ""; // Disable internal trace recording
+  const double dcg = benchmark(sketch, benchmark_args,
+                               [&](size_t rank) { sketch.sum += 1.0 / std::log2(rank + 1); });
 
-  if (args.record_adaptation_history)
-    adapter.save_history(std::format(
-        "output/{}.alpha_{}.trace.csv",
-        std::filesystem::path(args.trace_path).replace_extension().filename().string(),
-        fplus::trim_right('.', fplus::trim_right('0', std::format("{:f}", args.alpha)))));
+  if (!args.trace.empty())
+    adapter.save_history(std::filesystem::path{args.trace});
 
   return std::vector{dcg, sketch.update_time_avg_seconds(), sketch.estimate_time_avg_seconds()};
 }

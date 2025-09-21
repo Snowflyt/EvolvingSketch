@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <variant>
@@ -34,7 +36,7 @@ struct Args {
   size_t adapt_interval;
   double alpha;
   bool progress;
-  bool record_adaptation_history;
+  std::string trace;
 };
 
 auto parse_args(int argc, char **argv) -> Args {
@@ -48,9 +50,10 @@ auto parse_args(int argc, char **argv) -> Args {
       .help("The initial alpha value for time-decaying sketches")
       .scan<'g', double>();
   program.add_argument("-p", "--progress").help("Show progress bar").flag();
-  program.add_argument("--record-adaptation-history")
-      .help("Record adaptation history for W-TinyLFU_EVO (does not affect other policies)")
-      .flag();
+  program.add_argument("--trace")
+      .help("The path to a CSV file where the objective history is saved at each adapt_interval. "
+            "For W-TinyLFU_EVO, an additional 'parameter' (i.e., alpha) column is included.")
+      .default_value("");
 
   try {
     program.parse_args(argc, argv);
@@ -60,7 +63,7 @@ auto parse_args(int argc, char **argv) -> Args {
         .adapt_interval = program.get<size_t>("adapt_interval"),
         .alpha = program.get<double>("alpha"),
         .progress = program.get<bool>("--progress"),
-        .record_adaptation_history = program.get<bool>("--record-adaptation-history"),
+        .trace = program.get<std::string>("--trace"),
     };
   } catch (const std::exception &e) {
     throw usage_error(program.help().str(), e.what());
@@ -82,21 +85,62 @@ auto benchmark(CacheReplacementPolicy<K, V> &policy, const Args &args, OnHit on_
 
   size_t progress = 0;
 
-  for (const auto &req : trace) {
-    V value; // This is a dummy value
-    if (cache.contains(req.obj_id)) {
-      hit_count++;
-      if constexpr (!std::same_as<OnHit, Noop0>)
-        on_hit();
-      policy.handle_cache_hit(req.obj_id);
-    } else {
-      policy.handle_cache_miss(cache, req.obj_id, value);
+  if (args.trace.empty()) {
+    for (const auto &req : trace) {
+      V value; // This is a dummy value
+      if (cache.contains(req.obj_id)) {
+        hit_count++;
+        if constexpr (!std::same_as<OnHit, Noop0>)
+          on_hit();
+        policy.handle_cache_hit(req.obj_id);
+      } else {
+        policy.handle_cache_miss(cache, req.obj_id, value);
+      }
+
+      if (args.progress && progress++ % 1000 == 0)
+        std::cout << std::format("{:.4f}%", static_cast<double>(progress) /
+                                                static_cast<double>(trace.size()) * 100)
+                  << "\r" << std::flush;
+    }
+  } else {
+    size_t hit_count_curr = 0;
+    std::vector<double> history;
+
+    for (const auto &req : trace) {
+      V value; // This is a dummy value
+      if (cache.contains(req.obj_id)) {
+        hit_count++;
+        hit_count_curr++;
+        if constexpr (!std::same_as<OnHit, Noop0>)
+          on_hit();
+        policy.handle_cache_hit(req.obj_id);
+      } else {
+        policy.handle_cache_miss(cache, req.obj_id, value);
+      }
+
+      progress++;
+
+      if (progress % args.adapt_interval == 0) {
+        history.push_back(static_cast<double>(hit_count_curr) /
+                          static_cast<double>(args.adapt_interval));
+        hit_count_curr = 0;
+      }
+
+      if (args.progress && progress % 1000 == 0)
+        std::cout << std::format("{:.4f}%", static_cast<double>(progress) /
+                                                static_cast<double>(trace.size()) * 100)
+                  << "\r" << std::flush;
     }
 
-    if (args.progress && progress++ % 1000 == 0)
-      std::cout << std::format("{:.4f}%", static_cast<double>(progress) /
-                                              static_cast<double>(trace.size()) * 100)
-                << "\r" << std::flush;
+    std::ofstream file(args.trace);
+    if (!file.is_open())
+      throw std::runtime_error("Failed to open file for writing trace history: " + args.trace);
+
+    file << "objective\n";
+    for (const auto &entry : history)
+      file << std::format("{}\n", entry);
+
+    file.close();
   }
 
   return static_cast<double>(trace.size() - hit_count) / static_cast<double>(trace.size());
@@ -149,7 +193,7 @@ REGISTER_BENCHMARK_TASK("W-TinyLFU_EVO") {
 
   EpsilonGreedyAdapter adapter{0.01, 1000.0, 100, 0.1, 0.99};
 
-  if (args.record_adaptation_history)
+  if (!args.trace.empty())
     adapter.start_recording_history();
 
   auto f2 = [](uint32_t t, double alpha) -> float { return f(t, alpha); };
@@ -161,13 +205,12 @@ REGISTER_BENCHMARK_TASK("W-TinyLFU_EVO") {
                                  .adapt_interval = static_cast<uint32_t>(args.adapt_interval)});
   WTinyLFUPolicy<K, V, EvolvingSketchOptim<K, decltype(f2)>> policy{args.cache_size, sketch};
 
-  const double miss_ratio = benchmark(policy, args, [&]() { sketch->sum++; });
+  Args benchmark_args = args;
+  benchmark_args.trace = ""; // Disable internal trace recording
+  const double miss_ratio = benchmark(policy, benchmark_args, [&]() { sketch->sum++; });
 
-  if (args.record_adaptation_history)
-    adapter.save_history(std::format(
-        "output/{}.alpha_{}.trace.csv",
-        std::filesystem::path(args.trace_path).replace_extension().filename().string(),
-        fplus::trim_right('.', fplus::trim_right('0', std::format("{:f}", args.alpha)))));
+  if (!args.trace.empty())
+    adapter.save_history(std::filesystem::path{args.trace});
 
   return std::vector{miss_ratio, policy.update_time_avg_seconds(),
                      policy.estimate_time_avg_seconds()};

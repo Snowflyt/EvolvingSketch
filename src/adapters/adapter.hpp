@@ -62,7 +62,7 @@ public:
       throw std::runtime_error("Failed to open file for writing: " + path.string());
 
     // Write the header
-    file << "Objective,Parameter\n";
+    file << "objective,parameter\n";
     // Write the history
     for (const auto &[obj, param] : history_)
       file << std::format("{},{}\n", obj, param);
