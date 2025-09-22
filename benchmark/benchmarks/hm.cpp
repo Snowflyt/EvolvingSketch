@@ -335,8 +335,7 @@ REGISTER_BENCHMARK_TASK("EVO_PRUNING_ONLY") {
 REGISTER_BENCHMARK_TASK("EVO") {
   const Args args = parse_args(argc, argv);
 
-  // SlidingWindowThompsonSamplingAdapter adapter{0.01, 1000.0, 100, 10.0, 500};
-  EpsilonGreedyAdapter adapter{0.01, 1000.0, 100, 0.1, 0.99};
+  EpsilonGreedyAdapter adapter{0.01, 1000.0, 100, 0.01, 0.99};
 
   if (!args.trace.empty())
     adapter.start_recording_history();
